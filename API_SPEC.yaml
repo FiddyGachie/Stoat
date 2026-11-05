@@ -1,0 +1,193 @@
+openapi: 3.1.0
+info:
+  title: Stoat API
+  version: 2.0.0
+  description: Verified-delivery economic lifecycle API. Amounts are decimal strings.
+servers:
+  - url: https://api.example.invalid/v1
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      security: []
+      summary: Liveness check
+      responses:
+        "200": { description: Healthy }
+  /missions:
+    post:
+      summary: Create mission
+      operationId: createMission
+      responses:
+        "201": { description: Created }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    get:
+      summary: List missions
+      operationId: listMissions
+      responses:
+        "200": { description: Mission page }
+  /missions/{missionId}:
+    get:
+      summary: Get mission
+      parameters: [{ $ref: "#/components/parameters/MissionId" }]
+      responses:
+        "200": { description: Mission }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /services:
+    get:
+      summary: Discover services
+      operationId: discoverServices
+      responses:
+        "200": { description: Service page }
+  /quotes:
+    post:
+      summary: Request quote
+      operationId: requestQuote
+      responses:
+        "201": { description: Quote request created }
+  /quotes/{quoteId}/accept:
+    post:
+      summary: Accept quote subject to policy and reservation
+      operationId: acceptQuote
+      parameters: [{ name: quoteId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Agreement accepted }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /deliveries:
+    post:
+      summary: Submit delivery referencing controlled artifact_id
+      operationId: submitDelivery
+      responses:
+        "201": { description: Delivery submitted }
+  /deliveries/{deliveryId}:
+    get:
+      summary: Get delivery and verification
+      responses:
+        "200": { description: Delivery }
+  /deliveries/{deliveryId}/verify:
+    post:
+      summary: Run deterministic verifier
+      responses:
+        "200": { description: Verification result }
+  /deliveries/{deliveryId}/revision:
+    post:
+      summary: Request bounded revision
+      responses:
+        "202": { description: Revision queued }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /artifacts:
+    post:
+      summary: Upload controlled artifact
+      responses:
+        "201": { description: Artifact ID and checksum }
+  /obligations:
+    get:
+      summary: List obligations
+      responses:
+        "200": { description: Obligation page }
+  /settlement/batches:
+    post:
+      summary: Propose settlement batch
+      responses:
+        "201": { description: Batch proposed }
+  /settlement/batches/{batchId}/approve:
+    post:
+      summary: Human-only batch approval
+      responses:
+        "200": { description: Approved }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /settlement/batches/{batchId}/paypal-order:
+    post:
+      summary: Create PayPal order for approved batch
+      responses:
+        "201": { description: PayPal order created }
+  /settlement/batches/{batchId}/capture:
+    post:
+      summary: Capture after buyer approval; backend only
+      responses:
+        "202": { description: Capture submitted or pending }
+  /webhooks/paypal:
+    post:
+      security: []
+      summary: Verify and process PayPal webhook
+      responses:
+        "200": { description: Accepted / duplicate safely handled }
+        "400": { description: Invalid webhook }
+  /integrity:
+    get:
+      summary: Compute live financial and event invariants
+      responses:
+        "200": { description: Integrity report }
+  /agents/runs:
+    get:
+      summary: List authorized agent runs
+      responses:
+        "200": { description: Agent run page }
+  /agents/runs/{runId}:
+    get:
+      summary: Get agent run trace
+      responses:
+        "200": { description: Agent run }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    MissionId:
+      name: missionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    Amount:
+      type: string
+      pattern: '^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$'
+      description: Positive decimal string; currency precision validated separately.
+      examples: ["0.12", "10.00"]
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { $ref: "#/components/schemas/Amount" }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, correlation_id]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            correlation_id: { type: string }
+            details: { type: object }
+  responses:
+    BadRequest:
+      description: Validation failure
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Forbidden action
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: State or idempotency conflict
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unprocessable:
+      description: Policy or semantic validation failure
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

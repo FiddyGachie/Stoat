@@ -1,0 +1,19 @@
+{
+  "name": "sample-microservice",
+  "version": "1.0.0",
+  "commit": "c4d3e2b1a0f9e8d7c6b5a49382716054fedcba98",
+  "files": {
+    "src/auth.ts": {
+      "lines": 17,
+      "sha256": "4e73fcf81ec23ba8c1a603c58850a316ebad12fa28d6174bb0aa1eb2f5bc2b4f"
+    },
+    "src/math.ts": {
+      "lines": 9,
+      "sha256": "8da8577038e2ea5577609a3dc58fdbba4285ad406c7475f3a0a65dbf48b94156"
+    },
+    "src/worker.ts": {
+      "lines": 4,
+      "sha256": "ee489eb189cf0aa04186419736fdf5be737f59d5718712db6177b96e1a46452f"
+    }
+  }
+}

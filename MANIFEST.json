@@ -1,0 +1,136 @@
+{
+  "name": "Stoat v2.0 Implementation Pack",
+  "version": "2.0.0",
+  "generated_utc": "2026-10-31T17:40:58.593617+00:00",
+  "source_baseline": {
+    "IDEA.md": "4918eeeae0d60b50dc995624d72a1b43484da8dbf66957eda08da379c3fa6445",
+    "SPEC.md": "033d0e7c8c3637af47bb5c3e28abbd4ba4252803ca0627d65855e28d12381604",
+    "CHANGES_v0.2.md": "d93666f734eb248281cc5cfe0bfe2b9d04d2a5df75dfc54014f84cf437c4b9c7"
+  },
+  "files": {
+    "ACCEPTANCE.md": {
+      "bytes": 3219,
+      "sha256": "263cd7a4e6d523ffe07e8189f3bf946248e51fcf9344864462039f8faed3b5fe"
+    },
+    "AGENTS.md": {
+      "bytes": 3435,
+      "sha256": "c48037689a03d7af52057a95960feee6b3566b4ba7a98af941bd2b9b649d2de7"
+    },
+    "AGENT_ROLES.md": {
+      "bytes": 2670,
+      "sha256": "1657e249313db58e67d9c9fabdfab1f3d75bf6aaaa1cd4d6b1c04732d1ee28a9"
+    },
+    "AGENT_RUNTIME.md": {
+      "bytes": 2821,
+      "sha256": "013a74f7faa214b7a9cb5da4c92a59aa09abf69c5ee31b5d73d895bd3ca1f3a2"
+    },
+    "AG_GRID.md": {
+      "bytes": 2175,
+      "sha256": "445eb2b4854078b21e1d47661f95ccf204c0d4a63aea041bb4faa035d1c33d82"
+    },
+    "APIMATIC.md": {
+      "bytes": 1095,
+      "sha256": "19cf41856338004f32f305431aced67ec8c538f80767fba43e044e8a492811c1"
+    },
+    "API_SPEC.yaml": {
+      "bytes": 5766,
+      "sha256": "6179081a24f5e284eb9162e28b00d9d010794af40bfa575c60cc2152dca44d50"
+    },
+    "ARCHITECTURE.md": {
+      "bytes": 5104,
+      "sha256": "ccef5ecb0112c27067d632990d5c600644aa96586725891fb71836596cb00dbd"
+    },
+    "CHANGES_v0.2.md": {
+      "bytes": 4963,
+      "sha256": "d93666f734eb248281cc5cfe0bfe2b9d04d2a5df75dfc54014f84cf437c4b9c7"
+    },
+    "CLAUDE.md": {
+      "bytes": 2987,
+      "sha256": "e7122b6a141ec3284c6e00f783ac79fd4c812d4d9d106b6e84550f4741aeb3a4"
+    },
+    "DATABASE.md": {
+      "bytes": 4155,
+      "sha256": "f9621a3ce953cadc922e7c4fb86ac3ac8599ef1a180ad41895b5f275d08a4cfe"
+    },
+    "DECISIONS.md": {
+      "bytes": 2669,
+      "sha256": "bdcc0b81b08af537378df4c455824a862251f933e0912e5f7952d7bff8661ec8"
+    },
+    "DEMO_SCRIPT.md": {
+      "bytes": 2617,
+      "sha256": "7a1c70ed14fb983e4762d0e8ca3cb56bd0684b0e789882afd2c0a7875c07682f"
+    },
+    "DEPLOYMENT.md": {
+      "bytes": 1582,
+      "sha256": "f385d1543797d9e0dac5deaffdc562572190c8e161672642b2ac1e74af416b39"
+    },
+    "ENVIRONMENT.md": {
+      "bytes": 1541,
+      "sha256": "9ea8ec6a6c4956e90bf5563555bd0dc6890efcfc2f6a9592803229b7fed32d03"
+    },
+    "IDEA.md": {
+      "bytes": 9316,
+      "sha256": "b8686cf0361738a2d06c97f4249cb605eb082f43d710dbd3ff657ff07e067377"
+    },
+    "LEDGER_AND_ACCOUNTING.md": {
+      "bytes": 2959,
+      "sha256": "a44348b6a6472d38f8987c1f09878b494c5ac7d7887a1e24089a77c020323999"
+    },
+    "MCP_SPEC.md": {
+      "bytes": 2667,
+      "sha256": "d688ef46263a88771376fbe463d068b32b3622eafe5e2e638d01272d11e55a39"
+    },
+    "OBSERVABILITY.md": {
+      "bytes": 1506,
+      "sha256": "40a48bf569a61cb246566f7a6d2603d17013cd572893d32dea474ff230ff1174"
+    },
+    "PAYPAL.md": {
+      "bytes": 3101,
+      "sha256": "e82c12c398789de1c153a1b535587136d90cdfd9ca97ce41f1a5eabb86ee2909"
+    },
+    "PRODUCT_REQUIREMENTS.md": {
+      "bytes": 5271,
+      "sha256": "1606c950492169a271753138e939bdd27edd1f86246bab129434ca0e84430672"
+    },
+    "PROMPT.md": {
+      "bytes": 3723,
+      "sha256": "03c8b3f9c6bd72af1eae15aa04633c66ffa4fe81feab6c445e1c88c1b27a1413"
+    },
+    "PROTOCOL.md": {
+      "bytes": 3560,
+      "sha256": "423f8c652edaea45b8f1f16a3d8394151610363c8f7ebf95cf4de705593a8af8"
+    },
+    "README.md": {
+      "bytes": 2930,
+      "sha256": "000d75b0b86e138637af8a67e5e0a050dfeaed8e9f6a283834b7d1c18d2ec4c9"
+    },
+    "ROADMAP.md": {
+      "bytes": 2514,
+      "sha256": "fc068dfd3be25f27f764eb4fa9b54513707816fe06c8c53e0f4a84560afddfad"
+    },
+    "SECURITY_RUNBOOK.md": {
+      "bytes": 2256,
+      "sha256": "0da40dd092a911595b0f5d6afc5b32ed6f6fdbb8070bf4b29099c1cc7d21c505"
+    },
+    "SPEC.md": {
+      "bytes": 18406,
+      "sha256": "9a7609e53c79cfe456d0480c6fc6c516b5b95a69782356ca3edc93144fdba87d"
+    },
+    "SUBMISSION.md": {
+      "bytes": 2246,
+      "sha256": "14d8cee9ec5bf58dbce7a7e6f18cdcd2d75482fbae091e086dc7ea7f4696e705"
+    },
+    "SUBMISSION_CHECKLIST.md": {
+      "bytes": 1260,
+      "sha256": "7a1bf6ff61af0560b307b27cd4c20eeb52cf544e6debcd57d7dd8788da5812b1"
+    },
+    "TEST_PLAN.md": {
+      "bytes": 2952,
+      "sha256": "6580ecdc3d9aee2dbcc0bae486664621d4ed69081eea285449e5ed9233afe6b2"
+    },
+    "THREAT_MODEL.md": {
+      "bytes": 3153,
+      "sha256": "320608e6b443f4631743dd23ab72aadb17e031f5a03e423c5eaf3b6f4404b7fb"
+    }
+  }
+}
