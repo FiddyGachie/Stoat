@@ -15,6 +15,37 @@ dist/
 # ── Generated documentation (build output, not source) ────────────────────────
 docs/EVIDENCE.md
 
+# ── Spec / documentation markdown (not tracked in repo) ─────────────────────────
+AG_GRID.md
+ACCEPTANCE.md
+AGENT_ROLES.md
+AGENT_RUNTIME.md
+AGENTS.md
+APIMATIC.md
+CHANGES_v0.2.md
+DATABASE.md
+CLAUDE.md
+DECISIONS.md
+DEMO_SCRIPT.md
+DEPLOYMENT.md
+ENVIRONMENT.md
+IDEA.md
+LEDGER_AND_ACCOUNTING.md
+MCP_SPEC.md
+OBSERVABILITY.md
+PAYPAL.md
+PRODUCT_REQUIREMENTS.md
+PROMPT.md
+PROTOCOL.md
+SECURITY_RUNBOOK.md
+ROADMAP.md
+SPEC.md
+SUBMISSION_CHECKLIST.md
+SUBMISSION.md
+TASKS.md
+TEST_PLAN.md
+THREAT_MODEL.md
+
 # ── Logs & temp files ──────────────────────────────────────────────────────────
 *.log
 npm-debug.log*
