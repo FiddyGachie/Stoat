@@ -94,6 +94,7 @@ payment tools.
 
 ## Documentation
 
+- [STORY.md](STORY.md): why we built Stoat, how, and what's next.
 - [QUICK_START.md](QUICK_START.md): install, configure, run, troubleshoot.
 - [TEST_ACCOUNTS.md](TEST_ACCOUNTS.md): ready-made demo logins.
 - [docs/USER_GUIDE.md](docs/USER_GUIDE.md): for organisation owners and agent developers.
