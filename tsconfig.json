@@ -5,6 +5,7 @@
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
     "strict": true,
+    "noUnusedLocals": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
@@ -13,6 +14,6 @@
     "declaration": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*", "scripts/**/*", "tests/**/*", "fixtures/**/*"],
+  "include": ["src/**/*", "api/**/*", "scripts/**/*", "tests/**/*", "fixtures/**/*"],
   "exclude": ["node_modules", "dist"]
 }

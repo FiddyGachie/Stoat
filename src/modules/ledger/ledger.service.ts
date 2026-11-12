@@ -1,8 +1,15 @@
-import { DbClient, transaction } from '../../db/connection.js';
-import { EventsService } from '../events/events.service.js';
-import { Decimal } from 'decimal.js';
-import { toDecimalString } from '../../common/decimal.js';
-import { NotFoundError, ConflictError, StoatError } from '../../common/errors.js';
+import { DbClient, transaction } from "../../db/connection.js";
+import { runBalanceCheckHook } from "../wallet/wallet-hooks.js";
+import { getFundingMode } from "../wallet/funding-mode.js";
+import { chargeInTx } from "../wallet/charge.service.js";
+import { enqueueMissionCompletionJob } from "../wallet/mission-completion.service.js";
+import { EventsService } from "../events/events.service.js";
+import { toDecimalString } from "../../common/decimal.js";
+import {
+  NotFoundError,
+  ConflictError,
+  StoatError,
+} from "../../common/errors.js";
 
 export interface AccrueObligationResult {
   obligation: any;
@@ -11,11 +18,7 @@ export interface AccrueObligationResult {
 }
 
 export class LedgerService {
-  private eventsService: EventsService;
-
-  constructor(private db: DbClient) {
-    this.eventsService = new EventsService(db);
-  }
+  constructor(private db: DbClient) {}
 
   async accrueObligationForDelivery(params: {
     tenantId: string;
@@ -30,11 +33,11 @@ export class LedgerService {
          FROM agreements 
          WHERE tenant_id = $1 AND id = $2 
          FOR UPDATE`,
-        [params.tenantId, params.agreementId]
+        [params.tenantId, params.agreementId],
       );
 
       if (agRes.rows.length === 0) {
-        throw new NotFoundError('Agreement', params.agreementId);
+        throw new NotFoundError("Agreement", params.agreementId);
       }
 
       const agreement = agRes.rows[0];
@@ -45,18 +48,18 @@ export class LedgerService {
          FROM deliveries d 
          LEFT JOIN verifications v ON v.delivery_id = d.id 
          WHERE d.tenant_id = $1 AND d.id = $2`,
-        [params.tenantId, params.deliveryId]
+        [params.tenantId, params.deliveryId],
       );
 
       if (delRes.rows.length === 0) {
-        throw new NotFoundError('Delivery', params.deliveryId);
+        throw new NotFoundError("Delivery", params.deliveryId);
       }
 
       const delivery = delRes.rows[0];
-      if (delivery.verdict !== 'verified') {
+      if (delivery.verdict !== "verified") {
         throw new ConflictError(
-          'DELIVERY_NOT_VERIFIED',
-          `Cannot accrue obligation: delivery verdict is '${delivery.verdict || 'none'}', expected 'verified'.`
+          "DELIVERY_NOT_VERIFIED",
+          `Cannot accrue obligation: delivery verdict is '${delivery.verdict || "none"}', expected 'verified'.`,
         );
       }
 
@@ -66,23 +69,27 @@ export class LedgerService {
          WHERE tenant_id = $1 AND status = 'active' 
          AND ((scope_type = 'agreement' AND scope_id = $2) 
               OR (scope_type = 'mission' AND scope_id = $3))`,
-        [params.tenantId, params.agreementId, agreement.mission_id]
+        [params.tenantId, params.agreementId, agreement.mission_id],
       );
 
       if (holdsRes.rows.length > 0) {
-        throw new StoatError('HOLD_ACTIVE', `Active hold prevents obligation accrual: ${holdsRes.rows[0].reason}`, 422);
+        throw new StoatError(
+          "HOLD_ACTIVE",
+          `Active hold prevents obligation accrual: ${holdsRes.rows[0].reason}`,
+          422,
+        );
       }
 
       // 4. Invariant check: Exactly one obligation per agreement
       const existingOb = await tx.query(
-        'SELECT id, status, amount FROM obligations WHERE tenant_id = $1 AND agreement_id = $2',
-        [params.tenantId, params.agreementId]
+        "SELECT id, status, amount FROM obligations WHERE tenant_id = $1 AND agreement_id = $2",
+        [params.tenantId, params.agreementId],
       );
 
       if (existingOb.rows.length > 0) {
         throw new ConflictError(
-          'OBLIGATION_ALREADY_EXISTS',
-          `An obligation already exists for agreement '${params.agreementId}'.`
+          "OBLIGATION_ALREADY_EXISTS",
+          `An obligation already exists for agreement '${params.agreementId}'.`,
         );
       }
 
@@ -91,17 +98,21 @@ export class LedgerService {
         `SELECT id, account_code, normal_balance 
          FROM accounts 
          WHERE tenant_id = $1 AND currency = $2 AND account_code IN ('5001', '2001')`,
-        [params.tenantId, agreement.currency]
+        [params.tenantId, agreement.currency],
       );
 
-      const buyerExpenseAcc = accountsRes.rows.find((a) => a.account_code === '5001');
-      const providerPayableAcc = accountsRes.rows.find((a) => a.account_code === '2001');
+      const buyerExpenseAcc = accountsRes.rows.find(
+        (a) => a.account_code === "5001",
+      );
+      const providerPayableAcc = accountsRes.rows.find(
+        (a) => a.account_code === "2001",
+      );
 
       if (!buyerExpenseAcc || !providerPayableAcc) {
         throw new StoatError(
-          'ACCOUNT_MISSING',
+          "ACCOUNT_MISSING",
           `Required accounts (5001 or 2001) for currency '${agreement.currency}' are not configured.`,
-          500
+          500,
         );
       }
 
@@ -123,7 +134,7 @@ export class LedgerService {
           agreement.provider_id,
           amountStr,
           agreement.currency,
-        ]
+        ],
       );
       const obligation = obRes.rows[0];
       obligation.amount = String(obligation.amount);
@@ -132,10 +143,10 @@ export class LedgerService {
       const eventsService = new EventsService(tx);
       const eventRes = await eventsService.appendEvent({
         tenantId: params.tenantId,
-        aggregateType: 'obligation',
+        aggregateType: "obligation",
         aggregateId: obligation.id,
-        eventType: 'OBLIGATION_ACCRUED',
-        actorType: 'agent',
+        eventType: "OBLIGATION_ACCRUED",
+        actorType: "agent",
         actorId: agreement.provider_id,
         correlationId: params.correlationId,
         amount: obligation.amount,
@@ -155,7 +166,7 @@ export class LedgerService {
         ) VALUES (
           gen_random_uuid(), $1, $2, $3, 'posted', now()
         ) RETURNING id, tenant_id, source_event_id, reference, status, effective_at`,
-        [params.tenantId, eventRes.id, `obligation:${obligation.id}`]
+        [params.tenantId, eventRes.id, `obligation:${obligation.id}`],
       );
       const journalTx = jtRes.rows[0];
 
@@ -167,7 +178,13 @@ export class LedgerService {
         ) VALUES (
           gen_random_uuid(), $1, $2, $3, $4, 0, $5, 1
         ) RETURNING id, account_id, debit, credit, currency, sequence`,
-        [params.tenantId, journalTx.id, buyerExpenseAcc.id, amountStr, agreement.currency]
+        [
+          params.tenantId,
+          journalTx.id,
+          buyerExpenseAcc.id,
+          amountStr,
+          agreement.currency,
+        ],
       );
 
       // Credit line: Provider payable
@@ -177,8 +194,27 @@ export class LedgerService {
         ) VALUES (
           gen_random_uuid(), $1, $2, $3, 0, $4, $5, 2
         ) RETURNING id, account_id, debit, credit, currency, sequence`,
-        [params.tenantId, journalTx.id, providerPayableAcc.id, amountStr, agreement.currency]
+        [
+          params.tenantId,
+          journalTx.id,
+          providerPayableAcc.id,
+          amountStr,
+          agreement.currency,
+        ],
       );
+
+      // 10. Wallet mode: convert the Reservation into a Charge in this same transaction.
+      // Amount comes only from the obligation row; any failure rolls everything back.
+      if ((await getFundingMode(tx, params.tenantId)) === "wallet") {
+        await chargeInTx(tx, {
+          tenantId: params.tenantId,
+          obligationId: obligation.id,
+          correlationId: params.correlationId,
+        });
+        // Work verified and wallet charged: complete the mission now (the job re-checks that
+        // no other agreement on it is still live) instead of waiting for the 30 s sweep.
+        await enqueueMissionCompletionJob(tx, params.tenantId, agreement.mission_id);
+      }
 
       return {
         obligation,
@@ -198,45 +234,58 @@ export class LedgerService {
     return transaction(async (tx) => {
       // 1. Fetch original transaction & lines
       const jtRes = await tx.query(
-        'SELECT id, source_event_id, reference, status FROM journal_transactions WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
-        [params.tenantId, params.transactionId]
+        "SELECT id, source_event_id, reference, status FROM journal_transactions WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+        [params.tenantId, params.transactionId],
       );
 
       if (jtRes.rows.length === 0) {
-        throw new NotFoundError('JournalTransaction', params.transactionId);
+        throw new NotFoundError("JournalTransaction", params.transactionId);
       }
 
       const originalJt = jtRes.rows[0];
-      if (originalJt.status === 'reversed') {
-        throw new ConflictError('ALREADY_REVERSED', 'This journal transaction has already been reversed.');
+      if (originalJt.status === "reversed") {
+        throw new ConflictError(
+          "ALREADY_REVERSED",
+          "This journal transaction has already been reversed.",
+        );
       }
 
       const linesRes = await tx.query(
-        'SELECT account_id, debit, credit, currency, sequence FROM journal_lines WHERE tenant_id = $1 AND transaction_id = $2 ORDER BY sequence ASC',
-        [params.tenantId, params.transactionId]
+        "SELECT account_id, debit, credit, currency, sequence, wallet_id FROM journal_lines WHERE tenant_id = $1 AND transaction_id = $2 ORDER BY sequence ASC",
+        [params.tenantId, params.transactionId],
       );
 
       if (linesRes.rows.length === 0) {
-        throw new StoatError('NO_LINES', 'Original transaction has no journal lines to reverse.', 500);
+        throw new StoatError(
+          "NO_LINES",
+          "Original transaction has no journal lines to reverse.",
+          500,
+        );
       }
 
       // 2. Mark original transaction as reversed
-      await tx.query("UPDATE journal_transactions SET status = 'reversed' WHERE id = $1", [originalJt.id]);
+      await tx.query(
+        "UPDATE journal_transactions SET status = 'reversed' WHERE id = $1",
+        [originalJt.id],
+      );
 
       // 3. If tied to an obligation, mark obligation as reversed
-      if (originalJt.reference.startsWith('obligation:')) {
+      if (originalJt.reference.startsWith("obligation:")) {
         const obligationId = originalJt.reference.substring(11);
-        await tx.query("UPDATE obligations SET status = 'reversed', updated_at = now() WHERE id = $1", [obligationId]);
+        await tx.query(
+          "UPDATE obligations SET status = 'reversed', updated_at = now() WHERE id = $1",
+          [obligationId],
+        );
       }
 
       // 4. Append Reversal Event
       const eventsService = new EventsService(tx);
       const eventRes = await eventsService.appendEvent({
         tenantId: params.tenantId,
-        aggregateType: 'journal',
+        aggregateType: "journal",
         aggregateId: originalJt.id,
-        eventType: 'JOURNAL_TRANSACTION_REVERSED',
-        actorType: 'user',
+        eventType: "JOURNAL_TRANSACTION_REVERSED",
+        actorType: "user",
         actorId: params.actorId,
         correlationId: params.correlationId,
         payload: {
@@ -252,7 +301,7 @@ export class LedgerService {
         ) VALUES (
           gen_random_uuid(), $1, $2, $3, 'posted', now()
         ) RETURNING id, tenant_id, reference, status, effective_at`,
-        [params.tenantId, eventRes.id, `reversal:${originalJt.id}`]
+        [params.tenantId, eventRes.id, `reversal:${originalJt.id}`],
       );
       const reversalJt = revJtRes.rows[0];
 
@@ -262,22 +311,51 @@ export class LedgerService {
       for (const line of linesRes.rows) {
         const insLineRes = await tx.query(
           `INSERT INTO journal_lines (
-            id, tenant_id, transaction_id, account_id, debit, credit, currency, sequence
+            id, tenant_id, transaction_id, account_id, debit, credit, currency, sequence, wallet_id
           ) VALUES (
-            gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7
-          ) RETURNING id, account_id, debit, credit, currency, sequence`,
+            gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8
+          ) RETURNING id, account_id, debit, credit, currency, sequence, wallet_id`,
           [
             params.tenantId,
             reversalJt.id,
             line.account_id,
             line.credit, // swap: credit -> debit
-            line.debit,  // swap: debit -> credit
+            line.debit, // swap: debit -> credit
             line.currency,
             seq++,
-          ]
+            line.wallet_id ?? null,
+          ],
         );
         reversalLines.push(insLineRes.rows[0]);
       }
+
+      // 7a. Keep the drift detector in step with a legitimate reversal, exactly as postJournal does
+      // for an ordinary posting, so reversing an entry on a healthy wallet is not mistaken for drift.
+      // A wallet that is already blocked is left alone: its cache is not trusted, the derived value
+      // is authoritative, and the check below lifts the block only when the reversal itself brings
+      // derived back to the stored value (R9.15, R9.16).
+      await tx.query(
+        `UPDATE wallets w
+            SET balance_cache = GREATEST(0, w.balance_cache + d.delta),
+                last_activity_at = now(), updated_at = now()
+           FROM (
+             SELECT l.wallet_id, SUM(l.debit - l.credit) AS delta
+               FROM journal_lines l
+               JOIN accounts a ON a.id = l.account_id
+              WHERE l.tenant_id = $1 AND l.transaction_id = $2
+                AND a.account_code = '2103' AND l.wallet_id IS NOT NULL
+              GROUP BY l.wallet_id
+           ) d
+          WHERE w.id = d.wallet_id AND w.tenant_id = $1 AND w.status = 'active'`,
+        [params.tenantId, originalJt.id],
+      );
+
+      // 7. Wallet balance check (no-op until WalletService registers the hook)
+      await runBalanceCheckHook(
+        tx,
+        params.tenantId,
+        linesRes.rows.map((l) => l.wallet_id),
+      );
 
       return {
         reversalTransaction: reversalJt,
@@ -298,10 +376,10 @@ export class LedgerService {
     `;
     const params: any[] = [tenantId];
     if (status) {
-      sql += ' AND o.status = $2';
+      sql += " AND o.status = $2";
       params.push(status);
     }
-    sql += ' ORDER BY o.accrued_at DESC';
+    sql += " ORDER BY o.accrued_at DESC";
 
     const res = await this.db.query(sql, params);
     return res.rows.map((row: any) => ({
@@ -316,11 +394,11 @@ export class LedgerService {
               o.amount, o.currency, o.status, o.accrued_at, o.created_at
        FROM obligations o
        WHERE o.tenant_id = $1 AND o.id = $2`,
-      [tenantId, obligationId]
+      [tenantId, obligationId],
     );
 
     if (res.rows.length === 0) {
-      throw new NotFoundError('Obligation', obligationId);
+      throw new NotFoundError("Obligation", obligationId);
     }
 
     const row = res.rows[0];

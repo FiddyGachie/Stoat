@@ -31,7 +31,7 @@ export const DeliveriesWorkspace: React.FC = () => {
   const rows = status === 'ok' ? data.deliveries : [];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 24, background: 'transparent', boxSizing: 'border-box' }}>
       <div style={{ flex: 1 }}>
         <GridPanel
           title="Deliveries"
@@ -45,14 +45,14 @@ export const DeliveriesWorkspace: React.FC = () => {
       </div>
 
       {expanded && (
-        <div style={{ padding: 16, background: '#151726', borderTop: '1px solid #2d3352' }}>
+        <div style={{ padding: 16, background: 'rgba(255,255,255,0.72)', borderTop: '1px solid rgba(0,0,0,0.07)', backdropFilter: 'blur(18px)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             <h3 style={{ fontSize: 13, fontWeight: 600 }}>Verification Checks</h3>
             {!expanded['verdict'] && <StatusBadge label="pending" variant="info" />}
             <button
               onClick={() => setExpanded(null)}
               aria-label="Close verification checks"
-              style={{ marginLeft: 'auto', background: 'none', border: '1px solid #2d3352', color: '#64748b', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}
+              style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-muted)', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}
             >
               ✕
             </button>
@@ -62,26 +62,26 @@ export const DeliveriesWorkspace: React.FC = () => {
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {(expanded['checks'] as Record<string, unknown>[]).map((c, i) => (
                 <div key={i} style={{
-                  background: '#1e2235', border: `1px solid ${c['passed'] ? '#22c55e33' : '#ef444433'}`,
+                  background: 'rgba(255,255,255,0.80)', border: `1px solid ${c['passed'] ? 'var(--color-success-tint)' : 'var(--color-danger-tint)'}`,
                   borderRadius: 4, padding: '6px 10px', fontSize: 11,
                 }}>
-                  <span style={{ color: c['passed'] ? '#22c55e' : '#ef4444' }}>
+                  <span style={{ color: c['passed'] ? 'var(--color-success)' : 'var(--color-danger)' }}>
                     {c['passed'] ? '✓' : '✗'}
                   </span>{' '}
-                  <span style={{ color: '#94a3b8' }}>{String(c['check'])}</span>
-                  {c['message'] && <span style={{ color: '#ef4444', marginLeft: 4 }}>{String(c['message'])}</span>}
+                  <span style={{ color: 'var(--text-secondary)' }}>{String(c['check'])}</span>
+                  {typeof c['message'] === 'string' && c['message'] !== '' && <span style={{ color: 'var(--color-danger)', marginLeft: 4 }}>{String(c['message'])}</span>}
                 </div>
               ))}
             </div>
           ) : (
-            <p style={{ color: '#64748b', fontSize: 12 }}>No verification checks available for this delivery.</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>No verification checks available for this delivery.</p>
           )}
 
-          {expanded['reasons'] && (expanded['reasons'] as string[]).length > 0 && (
+          {Array.isArray(expanded['reasons']) && (expanded['reasons'] as string[]).length > 0 && (
             <div style={{ marginTop: 8 }}>
-              <h4 style={{ fontSize: 12, color: '#f59e0b', marginBottom: 4 }}>Rejection reasons</h4>
+              <h4 style={{ fontSize: 12, color: 'var(--color-warning)', marginBottom: 4 }}>Rejection reasons</h4>
               {(expanded['reasons'] as string[]).map((r, i) => (
-                <p key={i} style={{ fontSize: 12, color: '#f59e0b' }}>• {r}</p>
+                <p key={i} style={{ fontSize: 12, color: 'var(--color-warning)' }}>• {r}</p>
               ))}
             </div>
           )}
@@ -90,3 +90,7 @@ export const DeliveriesWorkspace: React.FC = () => {
     </div>
   );
 };
+
+
+
+

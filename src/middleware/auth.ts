@@ -2,7 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { getDb } from '../db/connection.js';
 import { AuthenticatedPrincipal, AgentRole, UserRole } from '../common/types.js';
-import { ForbiddenActionError, StoatError } from '../common/errors.js';
+import { ForbiddenActionError } from '../common/errors.js';
+import { verifyAccessToken } from '../common/auth-crypto.js';
 
 declare global {
   namespace Express {
@@ -32,7 +33,11 @@ export function authMiddleware(requiredRole?: (AgentRole | UserRole)[] | (AgentR
       const db = getDb();
       let principal: AuthenticatedPrincipal | null = null;
 
-      if (token.startsWith('agent:')) {
+      const allowLegacyTokens =
+        process.env.NODE_ENV !== 'production' &&
+        process.env.ALLOW_LEGACY_BEARER_TOKENS !== 'false';
+
+      if (token.startsWith('agent:') && allowLegacyTokens) {
         const agentId = token.substring(6);
         const result = await db.query(
           'SELECT id, tenant_id, role, name, status, scopes FROM agents WHERE id = $1',
@@ -69,7 +74,7 @@ export function authMiddleware(requiredRole?: (AgentRole | UserRole)[] | (AgentR
           scopes: typeof agent.scopes === 'string' ? JSON.parse(agent.scopes) : agent.scopes,
           name: agent.name,
         };
-      } else if (token.startsWith('user:')) {
+      } else if (token.startsWith('user:') && allowLegacyTokens) {
         const userId = token.substring(5);
         const result = await db.query(
           'SELECT id, tenant_id, email, role FROM users WHERE id = $1',
@@ -96,18 +101,71 @@ export function authMiddleware(requiredRole?: (AgentRole | UserRole)[] | (AgentR
           name: user.email,
         };
       } else {
-        // Standard JWT verification
-        const secret = process.env.JWT_SECRET || 'stoat-jwt-secret-key-32-chars-minimum!';
         try {
-          const decoded = jwt.verify(token, secret) as any;
-          principal = {
-            id: decoded.sub,
-            tenantId: decoded.tenant_id,
-            type: decoded.type || 'agent',
-            role: decoded.role,
-            scopes: decoded.scopes || [],
-            name: decoded.name || decoded.sub,
-          };
+          const decoded: jwt.JwtPayload = verifyAccessToken(token);
+          if (typeof decoded.sub !== 'string' || (decoded.type !== 'user' && decoded.type !== 'agent')) {
+            throw new Error('Invalid token claims');
+          }
+
+          if (decoded.type === 'agent') {
+            const result = await db.query(
+              'SELECT id, tenant_id, role, name, status, scopes FROM agents WHERE id = $1',
+              [decoded.sub]
+            );
+            const agent = result.rows[0];
+            if (!agent) {
+              res.status(401).json({
+                error: {
+                  code: 'INVALID_TOKEN',
+                  message: 'Invalid or expired JWT token.',
+                  correlation_id: req.correlationId || 'corr_unknown',
+                },
+              });
+              return;
+            }
+            if (agent.status !== 'active') {
+              res.status(403).json({
+                error: {
+                  code: 'AGENT_SUSPENDED',
+                  message: `Agent '${agent.name}' is ${agent.status}.`,
+                  correlation_id: req.correlationId || 'corr_unknown',
+                },
+              });
+              return;
+            }
+            principal = {
+              id: agent.id,
+              tenantId: agent.tenant_id,
+              type: 'agent',
+              role: agent.role as AgentRole,
+              scopes: typeof agent.scopes === 'string' ? JSON.parse(agent.scopes) : agent.scopes,
+              name: agent.name,
+            };
+          } else {
+            const result = await db.query(
+              'SELECT id, tenant_id, email, role FROM users WHERE id = $1',
+              [decoded.sub]
+            );
+            const user = result.rows[0];
+            if (!user) {
+              res.status(401).json({
+                error: {
+                  code: 'INVALID_TOKEN',
+                  message: 'Invalid or expired JWT token.',
+                  correlation_id: req.correlationId || 'corr_unknown',
+                },
+              });
+              return;
+            }
+            principal = {
+              id: user.id,
+              tenantId: user.tenant_id,
+              type: 'user',
+              role: user.role as UserRole,
+              scopes: ['all'],
+              name: user.email,
+            };
+          }
         } catch {
           res.status(401).json({
             error: {
@@ -136,5 +194,20 @@ export function authMiddleware(requiredRole?: (AgentRole | UserRole)[] | (AgentR
     } catch (err) {
       next(err);
     }
+  };
+}
+
+/**
+ * Human-only guard for money-moving actions (create PayPal order, capture). Agents may
+ * propose, never execute: CLAUDE.md invariant "no agent can approve, capture, release
+ * hold or override policy". Must run after authMiddleware().
+ */
+export function requireHumanPrincipal() {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    if (req.principal?.type !== 'user') {
+      next(new ForbiddenActionError('This action requires a signed-in human; agents cannot perform it.'));
+      return;
+    }
+    next();
   };
 }

@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none">
+  <defs>
+    <!-- Background chromatic aura -->
+    <radialGradient id="aura" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.25"/>
+      <stop offset="60%" stop-color="#06b6d4" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Main glass shield gradient -->
+    <linearGradient id="shieldGrad" x1="40" y1="20" x2="160" y2="180" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#f0f7ff" stop-opacity="0.6"/>
+    </linearGradient>
+    <!-- Specular light edge -->
+    <linearGradient id="specularBorder" x1="40" y1="20" x2="160" y2="180" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="50%" stop-color="#93c5fd" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.3"/>
+    </linearGradient>
+    <!-- Core brand emblem -->
+    <linearGradient id="emblemGrad" x1="60" y1="50" x2="140" y2="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2754c5"/>
+      <stop offset="60%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <filter id="glassDrop" x="10" y="10" width="180" height="180" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.08  0 0 0 0 0.16  0 0 0 0 0.38  0 0 0 0.12 0"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+  <!-- Ambient light -->
+  <circle cx="100" cy="100" r="90" fill="url(#aura)"/>
+  <!-- Glass Shield Outer Surface -->
+  <g filter="url(#glassDrop)">
+    <path d="M100 28L156 50V102C156 138 132 165 100 176C68 165 44 138 44 102V50L100 28Z" fill="url(#shieldGrad)" stroke="url(#specularBorder)" stroke-width="2"/>
+    <!-- Specular rim highlight on top half -->
+    <path d="M100 30L154 51V90C140 76 122 68 100 68C78 68 60 76 46 90V51L100 30Z" fill="#ffffff" fill-opacity="0.35"/>
+  </g>
+  <!-- Core Verified Emblem -->
+  <circle cx="100" cy="102" r="38" fill="url(#emblemGrad)"/>
+  <circle cx="100" cy="102" r="37" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.4"/>
+  <!-- Verified Tick -->
+  <path d="M86 102L96 112L116 88" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Autonomous Commerce Nodes -->
+  <circle cx="58" cy="142" r="9" fill="#15803d" stroke="#ffffff" stroke-width="2"/>
+  <circle cx="142" cy="142" r="9" fill="#0284c7" stroke="#ffffff" stroke-width="2"/>
+  <circle cx="100" cy="42" r="6" fill="#f59e0b" stroke="#ffffff" stroke-width="1.5"/>
+</svg>

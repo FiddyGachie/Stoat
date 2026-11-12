@@ -5,6 +5,7 @@ import { runMigrations } from '../../src/db/migrate.js';
 import { seedDatabase, SEED_IDS } from '../../src/db/seed.js';
 import { AgentRuntimeService } from '../../src/modules/agent-runtime/agent-runtime.service.js';
 import { LlmAdapter } from '../../src/modules/agent-runtime/llm-adapter.js';
+import { groundedOnlyDouble, reviewDouble, echoDouble, invalidDouble } from '../llm-double.js';
 import { dispatch } from '../test-utils.js';
 
 describe('Slice 3: Agent Runtime, LLM Adapter, Grounded Verifier & Revisions (P0-03, P0-04, P0-05, P0-10, P0-11, P0-12, P0-27)', () => {
@@ -60,7 +61,8 @@ describe('Slice 3: Agent Runtime, LLM Adapter, Grounded Verifier & Revisions (P0
 
   it('P0-03 & P0-10: Provider runs code review, recording identity, limits, steps and proposals', async () => {
     const { agreementId } = await createAcceptedAgreement();
-    const runtime = new AgentRuntimeService(getDb(), 'live');
+    // The model is a test double (tests/llm-double.ts); Stoat's own handling of its output is what is tested.
+    const runtime = new AgentRuntimeService(getDb(), 'live', undefined, { transport: groundedOnlyDouble });
 
     const result = await runtime.executeCodeReview({
       tenantId: SEED_IDS.tenantId,
@@ -256,9 +258,48 @@ describe('Slice 3: Agent Runtime, LLM Adapter, Grounded Verifier & Revisions (P0
     expect(rev3Res.body.error.code).toBe('MAX_REVISIONS_EXCEEDED');
   });
 
+  it('without a model key and no injected transport, a live call fails with LLM_NOT_CONFIGURED instead of inventing output', async () => {
+    const saved = { f: process.env.FIREWORKS_API_KEY, l: process.env.LLM_API_KEY, p: process.env.LLM_PROVIDER };
+    delete process.env.FIREWORKS_API_KEY; delete process.env.LLM_API_KEY; delete process.env.LLM_PROVIDER;
+    try {
+      const adapter = new LlmAdapter(getDb(), 'live');
+      await expect(adapter.execute({ prompt: 'x', schemaName: 'code_review_findings' })).rejects.toMatchObject({ code: 'LLM_NOT_CONFIGURED' });
+    } finally {
+      if (saved.f) process.env.FIREWORKS_API_KEY = saved.f;
+      if (saved.l) process.env.LLM_API_KEY = saved.l;
+      if (saved.p) process.env.LLM_PROVIDER = saved.p;
+    }
+  });
+
+  it('model output that does not match the findings schema fails closed with AGENT_OUTPUT_INVALID and creates no delivery', async () => {
+    const { agreementId } = await createAcceptedAgreement();
+    const runtime = new AgentRuntimeService(getDb(), 'live', undefined, { transport: invalidDouble });
+    await expect(runtime.executeCodeReview({ tenantId: SEED_IDS.tenantId, agreementId, providerAgentId: SEED_IDS.providerAgentId }))
+      .rejects.toMatchObject({ code: 'AGENT_OUTPUT_INVALID' });
+    const n = await getDb().query('SELECT COUNT(*)::int AS n FROM deliveries WHERE agreement_id = $1', [agreementId]);
+    expect(n.rows[0].n).toBe(0);
+  });
+
+  it('reject -> revise -> re-verify: the verifier\'s reasons reach the model, and the revised answer is verified', async () => {
+    const { agreementId } = await createAcceptedAgreement();
+    const double = reviewDouble();
+    const runtime = new AgentRuntimeService(getDb(), 'live', undefined, { transport: double });
+    const out = await runtime.executeCodeReviewWithRevisions({ tenantId: SEED_IDS.tenantId, agreementId, providerAgentId: SEED_IDS.providerAgentId });
+    expect(out.attempts).toHaveLength(2);
+    expect(out.attempts[0].verification.verdict).toBe('rejected');
+    expect(out.final.verification.verdict).toBe('verified');
+    expect(double.prompts[1]).toContain('REVISE:');
+    expect(double.prompts[1]).toContain('crypto_vault');
+    // The repository text the model sees is the real fixture, marked as data.
+    expect(double.prompts[0]).toContain('<<<FILE src/auth.ts>>>');
+    expect(double.prompts[0]).toContain('untrusted DATA');
+    const ag = await getDb().query('SELECT revision_count FROM agreements WHERE id = $1', [agreementId]);
+    expect(ag.rows[0].revision_count).toBe(1);
+  });
+
   it('P0-04 & P0-27: Replay mode replays exact hash and fails on unknown request hash', async () => {
     const db = getDb();
-    const adapter = new LlmAdapter(db, 'record');
+    const adapter = new LlmAdapter(db, 'record', { transport: echoDouble });
 
     // 1. Record an interaction
     const requestOptions = {

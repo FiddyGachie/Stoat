@@ -22,11 +22,12 @@ AGENT_ROLES.md
 AGENT_RUNTIME.md
 AGENTS.md
 APIMATIC.md
+ARCHITECTURE.md
 CHANGES_v0.2.md
 DATABASE.md
 CLAUDE.md
 DECISIONS.md
-DEMO_SCRIPT.md
+/DEMO_SCRIPT.md
 DEPLOYMENT.md
 ENVIRONMENT.md
 IDEA.md
@@ -67,3 +68,42 @@ desktop.ini
 
 # ── Render / deployment local state ───────────────────────────────────────────
 .render/
+
+# Generated agent verification reports
+.agents/
+
+# Local credential scratch files - never commit
+creds.txt
+*.creds
+secrets.*
+
+# ── AI / LLM agent development folders and planning files (never commit) ──────
+# Only real application code, tests, scripts and user-facing docs are tracked.
+.kiro/
+.agents/
+agents/
+.claude/
+.cursor/
+.codex/
+.windsurf/
+.continue/
+.copilot/
+.gemini/
+.roo/
+.aider*
+.clinerules
+.cursorrules
+.windsurfrules
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+TASKS.md
+MANIFEST.json
+CHANGES_v2.1.md
+CHANGES_*.md
+mcp.json
+.mcp.json
+# Local test/run output
+*_out.txt
+*_log.txt
+coverage/

@@ -1,12 +1,3 @@
-export interface ErrorPayload {
-  error: {
-    code: string;
-    message: string;
-    correlation_id: string;
-    details?: Record<string, any>;
-  };
-}
-
 export class StoatError extends Error {
   public readonly code: string;
   public readonly statusCode: number;

@@ -43,8 +43,8 @@ export const AgentsWorkspace: React.FC = () => {
     (run as { terminal_reason?: string })?.terminal_reason?.includes('replay');
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 0 }}>
-      <div style={{ flex: '0 0 35%', borderBottom: '1px solid #2d3352' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 0, padding: 24, background: 'transparent', boxSizing: 'border-box' }}>
+      <div style={{ flex: '0 0 35%', borderBottom: '1px solid rgba(0,0,0,0.07)' }}>
         <GridPanel
           title="Agents"
           rows={agents.status === 'ok' ? agents.data.agents : []}
@@ -55,7 +55,7 @@ export const AgentsWorkspace: React.FC = () => {
         />
       </div>
 
-      <div style={{ flex: '0 0 35%', borderBottom: '1px solid #2d3352' }}>
+      <div style={{ flex: '0 0 35%', borderBottom: '1px solid rgba(0,0,0,0.07)' }}>
         <GridPanel
           title="Agent Runs"
           rows={runs.status === 'ok' ? runs.data.runs : []}
@@ -68,34 +68,34 @@ export const AgentsWorkspace: React.FC = () => {
       </div>
 
       {selectedRun && (
-        <div style={{ flex: 1, padding: 16, overflow: 'auto', background: '#151726' }}>
+        <div style={{ flex: 1, padding: 16, overflow: 'auto', background: 'rgba(255,255,255,0.72)', borderTop: '1px solid rgba(0,0,0,0.07)', backdropFilter: 'blur(18px)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
             <h3 style={{ fontSize: 14, fontWeight: 600 }}>Trace: {selectedRun.substring(0, 12)}…</h3>
-            {trace.status === 'ok' && trace.data?.run && isReplayed(trace.data.run) && (
+            {trace.status === 'ok' && trace.data?.run && isReplayed(trace.data.run as unknown as Record<string, unknown>) && (
               <StatusBadge label="replayed agent trace" variant="replayed" />
             )}
             <button
               onClick={() => setSelectedRun(null)}
-              style={{ marginLeft: 'auto', background: 'none', border: '1px solid #2d3352', color: '#64748b', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}
+              style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-muted)', borderRadius: 4, padding: '2px 8px', cursor: 'pointer' }}
             >
               Close
             </button>
           </div>
 
-          {trace.status === 'loading' && <p style={{ color: '#64748b' }}>Loading trace…</p>}
-          {trace.status === 'error' && <p style={{ color: '#ef4444' }}>{trace.error}</p>}
+          {trace.status === 'loading' && <p style={{ color: 'var(--text-muted)' }}>Loading trace…</p>}
+          {trace.status === 'error' && <p style={{ color: 'var(--color-danger)' }}>{trace.error}</p>}
           {trace.status === 'ok' && trace.data && (
             <>
               {trace.data.steps?.length === 0 && (
-                <p style={{ color: '#64748b', fontSize: 12 }}>No steps recorded for this run.</p>
+                <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>No steps recorded for this run.</p>
               )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {(trace.data.steps ?? []).map((step: Record<string, unknown>, i: number) => (
-                  <div key={i} style={{ background: '#1e2235', border: '1px solid #2d3352', borderRadius: 4, padding: '8px 12px', fontSize: 12 }}>
-                    <span style={{ color: '#64748b' }}>#{Number(step['step_number'])}</span>{' '}
-                    <strong style={{ color: '#38bdf8' }}>{String(step['tool_name'] ?? '')}</strong>{' '}
+                  <div key={i} style={{ background: 'rgba(255,255,255,0.80)', border: '1px solid rgba(0,0,0,0.08)', borderRadius: 6, padding: '8px 12px', fontSize: 12 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>#{Number(step['step_number'])}</span>{' '}
+                    <strong style={{ color: 'var(--color-info)' }}>{String(step['tool_name'] ?? '')}</strong>{' '}
                     <StatusBadge label={String(step['authorization_result'] ?? '')} variant={step['authorization_result'] === 'allowed' ? 'ok' : 'error'} />
-                    {step['error_code'] && <span style={{ color: '#ef4444', marginLeft: 8 }}>{String(step['error_code'])}</span>}
+                    {typeof step['error_code'] === 'string' && step['error_code'] !== '' && <span style={{ color: 'var(--color-danger)', marginLeft: 8 }}>{String(step['error_code'])}</span>}
                   </div>
                 ))}
               </div>
@@ -106,3 +106,6 @@ export const AgentsWorkspace: React.FC = () => {
     </div>
   );
 };
+
+
+

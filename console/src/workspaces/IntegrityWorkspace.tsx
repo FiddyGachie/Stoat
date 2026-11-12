@@ -1,98 +1,108 @@
-import React from 'react';
-import { useFetch } from '../hooks.js';
-import { api } from '../api.js';
-import { StatusBadge } from '../components/StatusBadge.js';
+import React from "react";
+import { CircleCheck, RefreshCw, ShieldAlert, ShieldCheck, TriangleAlert } from "lucide-react";
+import type { ColDef } from "ag-grid-community";
+import { useFetch } from "../hooks.js";
+import { api } from "../api.js";
+import { Card, Icon, Loading } from "../components/ui.js";
+import { StatusBadge } from "../components/StatusBadge.js";
+import { GridPanel } from "../components/GridPanel.js";
 
+interface Row { label: string; hint: string; ok: boolean; value: string }
+
+const BALANCE_COLS: ColDef[] = [
+  { field: 'currency', headerName: 'Currency', width: 110 },
+  { field: 'total_debit', headerName: 'Total Debits', flex: 1,
+    valueFormatter: ({ value, data }) => `${value} ${(data as Record<string, string>)['currency']}` },
+  { field: 'total_credit', headerName: 'Total Credits', flex: 1,
+    valueFormatter: ({ value, data }) => `${value} ${(data as Record<string, string>)['currency']}` },
+  { field: 'delta', headerName: 'Difference', flex: 1,
+    valueFormatter: ({ value, data }) => `${value} ${(data as Record<string, string>)['currency']}` },
+  { field: 'balanced', headerName: 'Status', width: 130,
+    cellRenderer: ({ value }: { value: boolean }) =>
+      <StatusBadge label={value ? 'balanced' : 'unbalanced'} variant={value ? 'ok' : 'error'} /> },
+];
+
+/** Live accounting invariants. Every value is recomputed by the API on each refresh. */
 export const IntegrityWorkspace: React.FC = () => {
-  const { status, data, error, reload } = useFetch(() => api.integrity());
+  const report = useFetch(() => api.integrity());
 
-  const metrics = (status === 'ok' && data) ? data.metrics : null;
-  const healthy = status === 'ok' && data?.integrity_status === 'healthy';
+  if (report.status !== "ok") {
+    if (report.status === "error") {
+      return (
+        <Card>
+          <div className="notice notice-error" role="alert">
+            <Icon icon={TriangleAlert} />
+            <span>Integrity data could not be loaded: {report.error}</span>
+            <button type="button" className="small-button" onClick={report.reload}>Retry</button>
+          </div>
+        </Card>
+      );
+    }
+    return <Card><Loading label="Computing integrity…" /></Card>;
+  }
+  const { metrics, integrity_status, computed_at } = report.data;
+  const healthy = integrity_status === "healthy";
+  const balanced = (metrics.debit_credit_balance ?? []).every((b) => b.balanced);
+
+  const rows: Row[] = [
+    { label: "Journal balance", hint: "Debits equal credits in every currency", ok: balanced, value: balanced ? "Balanced" : "Out of balance" },
+    { label: "Event-chain gaps", hint: "Every event links to the one before it", ok: metrics.hash_chain_gaps === 0, value: String(metrics.hash_chain_gaps) },
+    { label: "Duplicate obligations", hint: "At most one payable per agreement", ok: metrics.duplicate_obligations === 0, value: String(metrics.duplicate_obligations) },
+    { label: "Duplicate reservations", hint: "No obligation is in two active batches", ok: metrics.duplicate_active_reservations === 0, value: String(metrics.duplicate_active_reservations) },
+    { label: "Orphan reservations", hint: "Reserved budget never exceeds the budget", ok: metrics.orphan_reservations === 0, value: String(metrics.orphan_reservations) },
+    { label: "Batch total mismatches", hint: "Each batch total equals its items", ok: metrics.batch_sum_mismatches === 0, value: String(metrics.batch_sum_mismatches) },
+    { label: "Unreconciled captures", hint: "Every captured payment is reconciled", ok: metrics.unreconciled_captures === 0, value: String(metrics.unreconciled_captures) },
+    { label: "Paid without a PayPal payout", hint: "An obligation is paid only when PayPal confirmed its payout item", ok: metrics.paid_without_payout === 0, value: String(metrics.paid_without_payout) },
+    { label: "Duplicate successful payouts", hint: "No obligation is paid twice", ok: metrics.duplicate_successful_payouts === 0, value: String(metrics.duplicate_successful_payouts) },
+    { label: "Payout above obligation", hint: "No payout exceeds what was owed", ok: metrics.payout_exceeds_obligation === 0, value: String(metrics.payout_exceeds_obligation) },
+    { label: "Non-PayPal payments", hint: "Every payment record is PayPal", ok: metrics.non_paypal_payments === 0, value: String(metrics.non_paypal_payments) },
+    { label: "Unauthorized agreements", hint: "Every agreement has an allow decision", ok: metrics.unauthorized_agreements === 0, value: String(metrics.unauthorized_agreements) },
+  ];
 
   return (
-    <div style={{ padding: 24, maxWidth: 800 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-        <h2 style={{ fontSize: 16, fontWeight: 600 }}>Integrity Panel</h2>
-        {status === 'ok' && (
-          <StatusBadge
-            label={healthy ? '✓ healthy' : '⚠ violation_detected'}
-            variant={healthy ? 'ok' : 'error'}
-          />
-        )}
-        <button
-          onClick={reload}
-          aria-label="Refresh integrity"
-          style={{
-            marginLeft: 'auto', background: '#252840', border: '1px solid #2d3352',
-            color: '#94a3b8', borderRadius: 4, padding: '4px 10px', cursor: 'pointer',
-          }}
-        >
-          Refresh
-        </button>
-      </div>
+    <>
+      <Card
+        className="card--full"
+        title={healthy ? "All integrity checks pass" : "Integrity violation detected"}
+        icon={healthy ? ShieldCheck : ShieldAlert}
+        description={`Computed ${new Date(computed_at).toLocaleString()}`}
+        actions={
+          <button type="button" className="btn btn-secondary" onClick={report.reload}>
+            <Icon icon={RefreshCw} /> Refresh
+          </button>
+        }
+      >
+        <StatusBadge label={healthy ? "healthy" : "violation detected"} variant={healthy ? "ok" : "error"} />
+      </Card>
 
-      {status === 'loading' && <p style={{ color: '#64748b' }}>Computing integrity…</p>}
-      {status === 'error' && (
-        <p role="alert" style={{ color: '#ef4444' }}>Error: {error}</p>
-      )}
-
-      {metrics && (
-        <div
-          role="table"
-          aria-label="Integrity metrics"
-          style={{ display: 'grid', gap: 1, background: '#2d3352', border: '1px solid #2d3352', borderRadius: 6 }}
-        >
-          {[
-            ['Journal balance', metrics.debit_credit_balance?.every((b: { balanced: boolean }) => b.balanced) ? '✓ balanced' : '✗ imbalanced',
-              metrics.debit_credit_balance?.every((b: { balanced: boolean }) => b.balanced)],
-            ['Hash chain gaps', metrics.hash_chain_gaps, metrics.hash_chain_gaps === 0],
-            ['Duplicate obligations', metrics.duplicate_obligations, metrics.duplicate_obligations === 0],
-            ['Duplicate active reservations', metrics.duplicate_active_reservations, metrics.duplicate_active_reservations === 0],
-            ['Orphan reservations', metrics.orphan_reservations, metrics.orphan_reservations === 0],
-            ['Batch sum mismatches', metrics.batch_sum_mismatches, metrics.batch_sum_mismatches === 0],
-            ['Unreconciled captures', metrics.unreconciled_captures, metrics.unreconciled_captures === 0],
-            ['Unauthorized agreements', metrics.unauthorized_agreements, metrics.unauthorized_agreements === 0],
-          ].map(([label, value, ok]) => (
-            <div
-              key={String(label)}
-              role="row"
-              style={{
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                padding: '10px 16px', background: '#1a1d2e',
-              }}
-            >
-              <span role="cell" style={{ color: '#94a3b8' }}>{String(label)}</span>
-              <span
-                role="cell"
-                style={{ fontWeight: 600, color: ok ? '#22c55e' : '#ef4444' }}
-                aria-label={`${String(label)}: ${String(value)}`}
-              >
-                {String(value)}
+      <div className="card-grid card-grid--kpi">
+        {rows.map((row) => (
+          <div className="card" key={row.label}>
+            <div className="stat">
+              <div>
+                <div className="stat-label">{row.label}</div>
+                <div className="stat-value">{row.value}</div>
+                <div className="stat-sub">{row.hint}</div>
+              </div>
+              <span className={`stat-icon ${row.ok ? "tone-success" : "tone-danger"}`}>
+                <Icon icon={row.ok ? CircleCheck : TriangleAlert} label={row.ok ? "Passing" : "Failing"} />
               </span>
             </div>
-          ))}
+          </div>
+        ))}
+      </div>
+
+      {(metrics.debit_credit_balance ?? []).length > 0 && (
+        <div style={{ marginTop: "var(--space-4)" }}>
+          <GridPanel
+            title="Journal Balance by Currency"
+            rows={metrics.debit_credit_balance}
+            cols={BALANCE_COLS}
+            getRowId={(p) => (p.data as { currency: string }).currency}
+            badge={<StatusBadge label="double-entry verified" variant="ok" />}
+          />
         </div>
       )}
-
-      {metrics?.debit_credit_balance?.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <h3 style={{ fontSize: 13, color: '#94a3b8', marginBottom: 8 }}>Journal balance by currency</h3>
-          {metrics.debit_credit_balance.map((b: { currency: string; total_debit: string; total_credit: string; delta: string; balanced: boolean }) => (
-            <div key={b.currency} style={{ display: 'flex', gap: 16, fontSize: 13, marginBottom: 4, color: b.balanced ? '#22c55e' : '#ef4444' }}>
-              <span style={{ width: 60, fontWeight: 600 }}>{b.currency}</span>
-              <span>Debit: {b.total_debit}</span>
-              <span>Credit: {b.total_credit}</span>
-              <span>Delta: {b.delta}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {status === 'ok' && (
-        <p style={{ marginTop: 12, fontSize: 11, color: '#475569' }}>
-          Computed at: {new Date(data.computed_at).toLocaleString()}
-        </p>
-      )}
-    </div>
+    </>
   );
 };

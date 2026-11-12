@@ -7,11 +7,13 @@
  * Per FR-034 and ACCEPTANCE.md P0-26:
  * - All IDs, amounts, and states come from actual API calls.
  * - Replayed traces are clearly labelled as such.
- * - Mocked PayPal is clearly labelled.
+ * - No simulated PayPal: real Sandbox API only.
  * - If a beat fails, the failure is recorded honestly.
  */
 
 import 'dotenv/config';
+// Scripted runs have no human buyer to approve PayPal, so they exercise the unfunded path.
+process.env.REQUIRE_FUNDING = 'false';
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,11 +23,14 @@ import { seedDatabase, SEED_IDS } from '../src/db/seed.js';
 import { MissionsService } from '../src/modules/missions/missions.service.js';
 import { QuotesService } from '../src/modules/quotes/quotes.service.js';
 import { AgreementsService } from '../src/modules/agreements/agreements.service.js';
-import { ArtifactsService } from '../src/modules/artifacts/artifacts.service.js';
-import { DeliveriesService } from '../src/modules/deliveries/deliveries.service.js';
-import { LedgerService } from '../src/modules/ledger/ledger.service.js';
+import { AgentRuntimeService } from '../src/modules/agent-runtime/agent-runtime.service.js';
+import type { LlmMode } from '../src/modules/agent-runtime/llm-adapter.js';
 import { SettlementService } from '../src/modules/settlement/settlement.service.js';
 import { PayPalService } from '../src/modules/paypal/paypal.service.js';
+import { getPayPalGateway, payPalStatus } from '../src/modules/paypal/paypal.gateway.js';
+import { payoutsCapability } from '../src/modules/paypal/capabilities.js';
+import { execSync } from 'node:child_process';
+function gitCommit(): string { try { return execSync('git rev-parse --short HEAD', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || 'uncommitted'; } catch { return 'uncommitted'; } }
 import { EventsService } from '../src/modules/events/events.service.js';
 import { IntegrityService } from '../src/modules/integrity/integrity.service.js';
 
@@ -48,17 +53,19 @@ async function main() {
     '# Stoat MVP — Evidence Report',
     '',
     `**Generated at:** ${new Date().toISOString()}`,
-    `**LLM mode:** \`replay\` (deterministic — not a live model call)`,
-    `**PayPal:** ${!process.env.PAYPAL_CLIENT_ID ? '⚠ MOCKED (no real credentials configured)' : '✓ Sandbox credentials present'}`,
+    `**Commit:** ${gitCommit()}`,
+    `**LLM:** a real model call per beat (DEMO_LLM_MODE=${process.env.DEMO_LLM_MODE ?? 'record'}: record = live call stored for later replay; replay = a stored real answer, labelled as such). No canned model output exists in the application.`,
+    `**Payouts capability:** ${payoutsCapability().status}${payoutsCapability().reason ? ' (' + payoutsCapability().reason + ')' : ''}. Sandbox spike evidence: docs/PAYPAL_PAYOUTS_SPIKE.md.`,
+    `**PayPal:** ${payPalStatus().configured ? '✓ PayPal ' + payPalStatus().environment + ' credentials present' : '✗ PayPal not configured'}`,
     '',
     '> All data in this document is generated from actual API calls against a live in-process database.',
-    '> No values are fabricated. Replayed traces are labelled. Mocked payments are labelled.',
+    '> No values are fabricated. Replayed traces are labelled. No payment is simulated.',
     '',
   ];
 
   const beats: { name: string; status: 'pass' | 'fail' | 'skip'; detail: string }[] = [];
 
-  process.env.LLM_MODE = 'replay';
+  const evidenceMode = (process.env.DEMO_LLM_MODE as LlmMode | undefined) ?? 'record';
 
   initDb();
   const db = getDb();
@@ -75,9 +82,7 @@ async function main() {
   const missions = new MissionsService(db);
   const quotes = new QuotesService(db);
   const agreements = new AgreementsService(db);
-  const artifacts = new ArtifactsService(db);
-  const deliveries = new DeliveriesService(db);
-  const ledger = new LedgerService(db);
+  const runtime = new AgentRuntimeService(db, evidenceMode);
   const eventsService = new EventsService(db);
   const settlement = new SettlementService(db, eventsService);
   const paypal = new PayPalService(db, eventsService);
@@ -86,14 +91,11 @@ async function main() {
   let mission: Record<string, unknown>;
   let quote: Record<string, unknown>;
   let agreement: Record<string, unknown>;
-  let delivery1: Record<string, unknown>;
-  let delivery2: Record<string, unknown>;
   let obligation: Record<string, unknown>;
   let batch: Record<string, unknown>;
   let approvedBatch: Record<string, unknown>;
-  let order: Record<string, unknown>;
-  let captureResult: Record<string, unknown>;
-
+  let order: Record<string, unknown> | undefined;
+  
   // ── Beat 1 ─────────────────────────────────────────────────────────────
   lines.push('## Beat 1 — Mission, Discovery, Quote & Agreement');
   try {
@@ -125,75 +127,22 @@ async function main() {
   }
 
   // ── Beat 2 ─────────────────────────────────────────────────────────────
-  lines.push('', '## Beat 2 — LLM Review, Grounding, Rejection & Revision');
+  lines.push('', '## Beat 2 — Real model review, independent grounding, rejection and revision');
   try {
-    // Ungrounded delivery → rejection
-    const badArtifact = await artifacts.uploadArtifact({
-      tenantId: TENANT,
-      payload: {
-        findings: [{
-          file: 'src/auth.ts', line_start: 4, line_end: 4,
-          snippet: 'const JWT_SECRET = "sk_live_insecure_hardcoded_secret_token_12345";',
-          rule_id: 'SEC-002', severity: 'critical', title: 'Hardcoded Secret',
-        }, {
-          file: 'src/crypto_vault.ts', // NOT in manifest — ungrounded
-          line_start: 10, line_end: 12,
-          snippet: 'const cipher = crypto.createCipher("des", key);',
-          rule_id: 'SEC-003', severity: 'high', title: 'Deprecated Cipher (UNGROUNDED)',
-        }],
-      },
+    const review = await runtime.executeCodeReviewWithRevisions({ tenantId: TENANT, agreementId: String(agreement['id']), providerAgentId: PROVIDER });
+    lines.push('', `Model: \`${review.final.model}\` via \`${review.final.provider}\`, mode: \`${review.final.mode}\` (${review.final.replayed ? 'REPLAYED recording, not a live call' : 'live call'})`);
+    review.attempts.forEach((a: any, i: number) => {
+      lines.push('', `### Attempt ${i + 1}`, j({ delivery_id: a.delivery.id, verdict: a.verification.verdict, reasons: a.verification.reasons, checks_passed: a.verification.checks.filter((c: any) => c.passed).length, checks_failed: a.verification.checks.filter((c: any) => !c.passed).length, request_hash: a.requestHash }));
     });
-
-    delivery1 = (await deliveries.submitDelivery({
-      tenantId: TENANT, agreementId: String(agreement['id']),
-      providerId: PROVIDER, artifactId: badArtifact.id,
-      declaredResult: { summary: 'Initial review' },
-    })) as Record<string, unknown>;
-
-    lines.push('', '### First delivery — rejected by grounding verifier (deterministic)');
-    lines.push('', `**Verdict:** \`${(delivery1['verification'] as Record<string, unknown>)['verdict']}\`  ⚠ LLM_MODE=replay — trace is replayed`);
-    lines.push(j({ id: (delivery1['delivery'] as Record<string, unknown>)['id'], verdict: (delivery1['verification'] as Record<string, unknown>)['verdict'], reasons: (delivery1['verification'] as Record<string, unknown>)['reasons'] }));
-
-    const revision = await deliveries.requestRevision({
-      tenantId: TENANT, buyerId: BUYER,
-      deliveryId: String((delivery1['delivery'] as Record<string, unknown>)['id']),
-      reasons: (delivery1['verification'] as Record<string, unknown>)['reasons'] as string[],
-    });
-    lines.push('', '### Revision requested', j(revision));
-
-    // Clean delivery → verified
-    const goodArtifact = await artifacts.uploadArtifact({
-      tenantId: TENANT,
-      payload: {
-        findings: [{
-          file: 'src/auth.ts', line_start: 4, line_end: 4,
-          snippet: 'const JWT_SECRET = "sk_live_insecure_hardcoded_secret_token_12345";',
-          rule_id: 'SEC-002', severity: 'critical', title: 'Hardcoded Secret',
-        }, {
-          file: 'src/auth.ts', line_start: 15, line_end: 15,
-          snippet: "const query = `SELECT * FROM users WHERE email = '${email}' AND is_active = true`;",
-          rule_id: 'SEC-001', severity: 'high', title: 'SQL Injection',
-        }],
-      },
-    });
-
-    delivery2 = (await deliveries.submitDelivery({
-      tenantId: TENANT, agreementId: String(agreement['id']),
-      providerId: PROVIDER, artifactId: goodArtifact.id,
-      declaredResult: { summary: 'Revised review — grounded findings only' },
-    })) as Record<string, unknown>;
-
-    obligation = (delivery2['obligation'] as Record<string, unknown>);
-
-    lines.push('', '### Revised delivery — verified (grounded)', j({ verdict: (delivery2['verification'] as Record<string, unknown>)['verdict'], checks_passed: ((delivery2['verification'] as Record<string, unknown>)['checks'] as Record<string, unknown>[]).filter((c) => c['passed']).length }));
-    beats.push({ name: 'Beat 2 — Grounding/Revision', status: 'pass', detail: `delivery2_id=${(delivery2['delivery'] as Record<string, unknown>)['id']}` });
+    if (review.final.verification.verdict !== 'verified') throw new Error('The model did not produce a verifiable review within the revision limit.');
+    obligation = review.final.obligation as Record<string, unknown>;
+    beats.push({ name: 'Beat 2 — Real model + grounding', status: 'pass', detail: `attempts=${review.attempts.length} model=${review.final.model} delivery=${review.final.delivery.id}` });
   } catch (e: unknown) {
     lines.push('', `**Beat 2 FAILED:** ${String(e)}`);
     beats.push({ name: 'Beat 2', status: 'fail', detail: String(e) });
     finalise(lines, beats, {});
     return;
   }
-
   // ── Beat 3 ─────────────────────────────────────────────────────────────
   lines.push('', '## Beat 3 — Obligation, Double-Entry Journal, Batch & Human Approval');
   try {
@@ -224,43 +173,24 @@ async function main() {
   }
 
   // ── Beat 4 ─────────────────────────────────────────────────────────────
-  const isSimulated = !process.env.PAYPAL_CLIENT_ID || process.env.PAYPAL_SIMULATED === 'true';
-  lines.push('', `## Beat 4 — PayPal Order, Capture, Webhook & Reconciliation${isSimulated ? ' (MOCKED — no real credentials)' : ''}`);
-
-  try {
-    order = await paypal.createOrderForBatch({ tenantId: TENANT, batchId: String(approvedBatch['id']), userId: USER }) as unknown as Record<string, unknown>;
-    lines.push('', `### PayPal order created${isSimulated ? ' **(MOCKED)**' : ''}`, j({ order_id: order['order_id'], approve_url: order['approve_url'], status: order['status'] }));
-
-    captureResult = await paypal.captureOrder({ tenantId: TENANT, orderId: String(order['order_id']), userId: USER }) as unknown as Record<string, unknown>;
-    lines.push('', `### PayPal capture${isSimulated ? ' **(MOCKED)**' : ''}`, j({ capture_id: captureResult['capture_id'], amount: captureResult['amount'], currency: captureResult['currency'], status: captureResult['status'] }));
-
-    const whResult = await paypal.handleWebhook({
-      headers: { 'paypal-transmission-sig': 'evidence-valid-sig', 'paypal-transmission-id': `ev-${Date.now()}` },
-      rawBody: '{}',
-      payload: {
-        id: `WH-EV-${Date.now()}`, event_type: 'PAYMENT.CAPTURE.COMPLETED',
-        resource: {
-          id: captureResult['capture_id'], custom_id: approvedBatch['id'],
-          amount: { value: captureResult['amount'], currency_code: captureResult['currency'] },
-        },
-      },
-    });
-    lines.push('', '### Webhook verified & reconciled', j({ valid: whResult.valid, duplicate: whResult.duplicate }));
-
-    const recRow = await db.query(
-      'SELECT verdict, expected_amount, actual_amount, expected_currency, details FROM reconciliation_records WHERE tenant_id = $1 AND batch_id = $2 LIMIT 1',
-      [TENANT, approvedBatch['id']]
-    );
-    if (recRow.rows[0]) {
-      lines.push('', '### Reconciliation record', j(recRow.rows[0]));
-      lines.push('', '> **Note:** PayPal Sandbox capture is buyer-to-merchant. Provider payable obligations remain internal ledger items and are NOT disbursed by this flow.');
+  const ppStatus = payPalStatus();
+  lines.push('', '## Beat 4 — PayPal Order (real ' + (ppStatus.environment ?? 'unconfigured') + ' API)');
+  if (!ppStatus.configured) {
+    lines.push('', '**Not run:** PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET are not set. Nothing was simulated.');
+    beats.push({ name: 'Beat 4 — PayPal', status: 'fail', detail: 'PayPal not configured' });
+  } else {
+    try {
+      order = await paypal.createOrderForBatch({ tenantId: TENANT, batchId: String(approvedBatch['id']), userId: USER }) as unknown as Record<string, unknown>;
+      lines.push('', '### PayPal order created by PayPal', j({ order_id: order['order_id'], approve_url: order['approve_url'], status: order['status'] }));
+      const live = await getPayPalGateway().getOrder(String(order['order_id']));
+      lines.push('', '### Order read back from PayPal', j({ order_status: live.orderStatus, custom_id: live.customId }));
+      lines.push('', '> **Capture not performed.** A Sandbox buyer must approve the order in a browser first; PayPal refuses capture until then. Evidence of a capture requires that manual step.');
+      beats.push({ name: 'Beat 4 — PayPal', status: 'pass', detail: `real order=${order['order_id']} status=${live.orderStatus}; capture needs buyer approval` });
+    } catch (e: unknown) {
+      lines.push('', `**Beat 4 FAILED:** ${String(e)}`);
+      beats.push({ name: 'Beat 4', status: 'fail', detail: String(e) });
     }
-    beats.push({ name: 'Beat 4 — PayPal', status: 'pass', detail: `order=${order['order_id']} capture=${captureResult['capture_id']}` });
-  } catch (e: unknown) {
-    lines.push('', `**Beat 4 FAILED:** ${String(e)}`);
-    beats.push({ name: 'Beat 4', status: 'fail', detail: String(e) });
   }
-
   // ── Integrity ──────────────────────────────────────────────────────────
   lines.push('', '## Integrity Check');
   try {
@@ -277,9 +207,8 @@ async function main() {
     agreement_id: String(agreement!['id']),
     obligation_id: String(obligation!['id']),
     batch_id: String(batch!['id']),
-    paypal_order_id: String(order!['order_id']),
-    paypal_capture_id: String(captureResult!['capture_id']),
-    paypal_simulated: String(isSimulated),
+    paypal_order_id: String(order?.['order_id'] ?? 'none'),
+    paypal_environment: String(ppStatus.environment ?? 'unconfigured'),
   });
 }
 

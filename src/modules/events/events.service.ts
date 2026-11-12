@@ -1,12 +1,12 @@
 import { DbClient } from '../../db/connection.js';
-import { sha256, computeEventHash } from '../../common/crypto.js';
+import { computeEventHash } from '../../common/crypto.js';
 
 export interface AppendEventParams {
   tenantId: string;
   aggregateType: string;
   aggregateId: string;
   eventType: string;
-  actorType: 'agent' | 'user';
+  actorType: 'agent' | 'user' | 'system';
   actorId: string;
   correlationId?: string;
   amount?: string;

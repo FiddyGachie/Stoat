@@ -25,12 +25,12 @@ export async function seedDatabase(customDb?: DbClient): Promise<void> {
   await db.query(`
     INSERT INTO tenants (id, name, status, settings)
     VALUES ($1, $2, $3, $4)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (id) DO UPDATE SET settings = tenants.settings || EXCLUDED.settings;
   `, [
     SEED_IDS.tenantId,
     'Acme Autonomous Org',
     'active',
-    JSON.stringify({ default_currency: 'USD', max_revisions: 2 }),
+    JSON.stringify({ default_currency: 'USD', max_revisions: 2, data_source: 'seeded_demo' }),
   ]);
 
   // 2. Human Operator User
@@ -231,6 +231,10 @@ export async function seedDatabase(customDb?: DbClient): Promise<void> {
     JSON.stringify({ input: 'repo_fixture', output: 'lint_report' }),
     JSON.stringify(staticServiceVerificationProfile),
   ]);
+  // A negotiation floor lets the buyer agent make a real counteroffer on the seeded service.
+  await db.query(`UPDATE services SET min_price = 0.09 WHERE id = $1 AND min_price IS NULL`, [SEED_IDS.aiServiceId]);
+  // Stoat runs this service's model review itself once a deal is ready.
+  await db.query(`UPDATE services SET execution_mode = 'hosted' WHERE id = $1`, [SEED_IDS.aiServiceId]);
 
   console.log('[Seed] Database seeded with tenant, users, agents, services, accounts, and policies.');
 }

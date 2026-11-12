@@ -68,13 +68,13 @@ export class MissionsService {
     return mission;
   }
 
-  async listMissions(tenantId: string): Promise<any[]> {
+  async listMissions(tenantId: string, buyerId?: string): Promise<any[]> {
     const res = await this.db.query(
-      `SELECT id, buyer_id, title, brief, budget, reserved_budget, currency, deadline, status, created_at
+      `SELECT id, buyer_id, title, brief, budget, reserved_budget, currency, deadline, status, created_at, replay_of
        FROM missions
-       WHERE tenant_id = $1
+       WHERE tenant_id = $1 AND ($2::uuid IS NULL OR buyer_id = $2) AND status <> 'deleted'
        ORDER BY created_at DESC`,
-      [tenantId]
+      [tenantId, buyerId ?? null]
     );
 
     return res.rows.map((row: any) => ({
@@ -84,12 +84,12 @@ export class MissionsService {
     }));
   }
 
-  async getMission(tenantId: string, missionId: string): Promise<any> {
+  async getMission(tenantId: string, missionId: string, buyerId?: string): Promise<any> {
     const res = await this.db.query(
       `SELECT id, buyer_id, title, brief, budget, reserved_budget, currency, deadline, status, created_at
        FROM missions
-       WHERE tenant_id = $1 AND id = $2`,
-      [tenantId, missionId]
+       WHERE tenant_id = $1 AND id = $2 AND ($3::uuid IS NULL OR buyer_id = $3)`,
+      [tenantId, missionId, buyerId ?? null]
     );
 
     if (res.rows.length === 0) {

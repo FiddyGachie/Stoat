@@ -6,7 +6,7 @@ export type AgentRole =
   | 'verifier_advisor'
   | 'copilot';
 
-export type UserRole = 'operator' | 'supervisor' | 'viewer';
+export type UserRole = 'buyer' | 'operator' | 'supervisor' | 'viewer';
 
 export interface AuthenticatedPrincipal {
   id: string;

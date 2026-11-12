@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Stoat API
-  version: 2.0.0
-  description: Verified-delivery economic lifecycle API. Amounts are decimal strings.
+  version: 2.1.0
+  description: Verified-delivery economic lifecycle API. Amounts are decimal strings. All real money movement is PayPal (Orders v2 collection, Payouts disbursement).
 servers:
   - url: https://api.example.invalid/v1
 security:
@@ -14,6 +14,51 @@ paths:
       summary: Liveness check
       responses:
         "200": { description: Healthy }
+  /auth/signup:
+    post:
+      security: []
+      summary: Create an organization buyer account and initial buyer agent
+      operationId: signup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignupRequest" }
+      responses:
+        "201": { description: Account created }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /auth/login:
+    post:
+      security: []
+      summary: Authenticate an organization user
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200": { description: Access token issued }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/agent/login:
+    post:
+      security: []
+      summary: Authenticate an owner-provisioned agent
+      operationId: loginAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentLoginRequest" }
+      responses:
+        "200": { description: Agent access token issued }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /auth/me:
+    get:
+      summary: Get the authenticated principal
+      operationId: getCurrentPrincipal
+      responses:
+        "200": { description: Authenticated user or agent }
   /missions:
     post:
       summary: Create mission
@@ -33,12 +78,110 @@ paths:
       responses:
         "200": { description: Mission }
         "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      summary: Edit an open mission (title, brief, budget)
+      description: >-
+        Human owner (the user who owns the mission's buyer agent) or Admin only. Only status
+        'created'. The budget cannot go below what is already reserved or charged
+        (409 BUDGET_BELOW_COMMITTED). Moves no money.
+      parameters: [{ $ref: "#/components/parameters/MissionId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 200 }
+                brief: { type: string, maxLength: 5000 }
+                budget: { $ref: "#/components/schemas/DecimalString" }
+      responses:
+        "200": { description: The updated mission }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      summary: Delete an open mission (soft delete; history is kept)
+      description: >-
+        Human owner or Admin only. Status becomes 'deleted' and the mission leaves lists; open
+        quotes are withdrawn. Refused while a provider is working (MISSION_HAS_LIVE_WORK) or funds
+        are reserved (MISSION_HAS_RESERVATION). Completed missions cannot be deleted.
+      parameters: [{ $ref: "#/components/parameters/MissionId" }]
+      responses:
+        "200": { description: "{ id, status: deleted, withdrawn_quotes }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /missions/{missionId}/replay:
+    post:
+      summary: Replay a completed mission at half the last final spend
+      description: >-
+        Human owner or Admin only. Creates a new mission (replay_of = this one) with a budget of
+        half the last spend (rounded down to cents, at least 0.01), requests a quote from the same
+        service with the same scope, and runs the buyer agent's negotiation toward that budget.
+        The provider's price floor is respected and nothing is accepted automatically. If the
+        model cannot run, negotiation_error explains why and the quote stays open.
+      parameters: [{ $ref: "#/components/parameters/MissionId" }]
+      responses:
+        "201": { description: "{ mission, replay_of, last_spend, target_budget, quote, negotiation, negotiation_error }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "MISSION_NOT_COMPLETED or MISSION_HAS_NO_RESULT" }
+  /mission-results:
+    get:
+      summary: Archived mission results (append-only, kept for future reference)
+      description: >-
+        Human owner (own missions) or Admin (tenant). One record per verified agreement, written when
+        its mission completes and backfilled for older completed missions on first read.
+      parameters:
+        - { name: mission_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+      responses:
+        "200": { description: "{ results: [...] }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /missions/{missionId}/quotes:
+    get:
+      summary: List persisted quotes for a mission
+      operationId: listMissionQuotes
+      parameters: [{ $ref: "#/components/parameters/MissionId" }]
+      responses:
+        "200": { description: Mission quote history }
+        "404": { $ref: "#/components/responses/NotFound" }
   /services:
     get:
       summary: Discover services
       operationId: discoverServices
       responses:
         "200": { description: Service page }
+    post:
+      summary: Publish a fixed-unit service as the authenticated provider agent
+      operationId: publishService
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PublishServiceRequest" }
+      responses:
+        "201": { description: Service published }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /agents:
+    get:
+      summary: List authorized agents
+      operationId: listAgents
+      responses:
+        "200": { description: Agent page }
+    post:
+      summary: Provision a buyer or provider agent for the organization
+      operationId: provisionAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProvisionAgentRequest" }
+      responses:
+        "201": { description: Agent and one-time credential returned }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /quotes:
     post:
       summary: Request quote
@@ -49,7 +192,15 @@ paths:
     post:
       summary: Accept quote subject to policy and reservation
       operationId: acceptQuote
-      parameters: [{ name: quoteId, in: path, required: true, schema: { type: string, format: uuid } }]
+      parameters:
+        [
+          {
+            name: quoteId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          },
+        ]
       responses:
         "200": { description: Agreement accepted }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -65,11 +216,6 @@ paths:
       summary: Get delivery and verification
       responses:
         "200": { description: Delivery }
-  /deliveries/{deliveryId}/verify:
-    post:
-      summary: Run deterministic verifier
-      responses:
-        "200": { description: Verification result }
   /deliveries/{deliveryId}/revision:
     post:
       summary: Request bounded revision
@@ -97,16 +243,16 @@ paths:
       responses:
         "200": { description: Approved }
         "403": { $ref: "#/components/responses/Forbidden" }
-  /settlement/batches/{batchId}/paypal-order:
+  /settlement/batches/{batchId}/paypal/create-order:
     post:
-      summary: Create PayPal order for approved batch
+      summary: Create the PayPal order for an approved batch whose agreements were not paid at acceptance (409 BATCH_ALREADY_FUNDED otherwise)
       responses:
         "201": { description: PayPal order created }
-  /settlement/batches/{batchId}/capture:
+  /settlement/batches/{batchId}/paypal/capture:
     post:
-      summary: Capture after buyer approval; backend only
+      summary: Capture after buyer approval (body order_id); PayPal refuses with PAYPAL_ORDER_NOT_APPROVED until the buyer approves
       responses:
-        "202": { description: Capture submitted or pending }
+        "200": { description: Capture result, reconciled against the batch }
   /webhooks/paypal:
     post:
       security: []
@@ -129,6 +275,1254 @@ paths:
       summary: Get agent run trace
       responses:
         "200": { description: Agent run }
+  # ── v2.1: PayPal-only money movement ─────────────────────────────────────
+  # Every payment, capture, refund and payout is a PayPal operation. No request may carry a
+  # "provider" field on these routes: it is rejected with 400 PROVIDER_NOT_ACCEPTED.
+  /paypal/status:
+    get:
+      summary: PayPal configuration and independent Orders / Payouts capability status
+      description: Reports orders and payouts capability (enabled, blocked, unknown, degraded). Never returns credentials or scopes.
+      responses:
+        "200": { description: Status }
+  /payments/due:
+    get:
+      summary: Payments waiting for the signed-in person to approve at PayPal
+      description: Human sessions only. Agent principals receive 403.
+      responses:
+        "200": { description: Payments awaiting approval }
+        "403": { description: Agent principal }
+  /agreements/{agreementId}/payment:
+    parameters:
+      - {
+          name: agreementId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      summary: Latest PayPal collection for an agreement
+      description: Human sessions only. Agent principals receive 403.
+      responses:
+        "200": { description: Payment or null }
+    post:
+      summary: Create (or reuse) the PayPal Orders v2 order that collects the agreement price
+      description: Human sessions only. Agent principals receive 403.
+      responses:
+        "200": { description: Payment with approve_url }
+        "503": { description: PAYPAL_NOT_CONFIGURED }
+  /payments/{paymentId}/refresh:
+    parameters:
+      - {
+          name: paymentId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: Ask PayPal where a payment stands now; captures it if the buyer approved
+      description: Human sessions only. Agent principals receive 403.
+      responses:
+        "200": { description: Payment }
+        "404": { description: Not found in this tenant }
+  /agreements/{agreementId}/refund:
+    parameters:
+      - {
+          name: agreementId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: Refund funded money through PayPal while no obligation exists for the agreement
+      description: Operator or supervisor sessions only.
+      responses:
+        "200": { description: Refunded payment }
+        "409": { description: FUNDS_ALLOCATED }
+  /agreements/{agreementId}/result:
+    parameters:
+      - {
+          name: agreementId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      summary: The verified work the provider delivered, with every attempt and the verifier reasons
+      description: >-
+        Readable by the agreement's buyer agent, its provider agent, the buyer agent's owner, and
+        operators or supervisors. Anyone else gets 404. result is null until a delivery is verified.
+        result carries the provider model's summary, files_reviewed and findings (each with a
+        recommendation), sorted by severity. Nothing is rewritten by Stoat.
+      responses:
+        "200":
+          {
+            description: "agreement, mission, provider, obligation, result, attempts",
+          }
+        "404": { description: Not found or not visible to this principal }
+  /settlement/treasury-plan:
+    post:
+      summary: The treasury agent (a real model call) proposes settlement batches and the PayPal route for each
+      description: >-
+        Human sessions only (buyer, operator or supervisor); agent principals receive 403. The model
+        reads payable, unbatched obligations and picks release_collected_funds (the buyer already
+        paid through PayPal) or collect_via_paypal_order. Deterministic checks reject unknown ids,
+        mixed currencies, mixed collected and uncollected work, a route that does not match what
+        PayPal captured, and any obligation left unaccounted for; one corrective retry, then fail
+        closed. Created batches are approval_required: a person approves, releases or collects, and
+        separately approves payouts.
+      responses:
+        "200":
+          {
+            description: "run_id, model, mode, replayed, summary, batches[{batch_id, route, rationale, next_action}], excluded",
+          }
+        "403": { description: Agent principals cannot ask for a plan }
+        "422":
+          {
+            description: "AGENT_OUTPUT_INVALID: the plan failed the checks; no batch was created",
+          }
+        "503": { description: "LLM_NOT_CONFIGURED" }
+  /settlement/batches/{batchId}/release-funded:
+    parameters:
+      - {
+          name: batchId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: Settle an approved batch from money already collected at acceptance (no second charge)
+      description: Human sessions only. Agent principals receive 403.
+      responses:
+        "200": { description: Batch confirmed }
+  /agents/{agentId}/payout-account:
+    parameters:
+      - {
+          name: agentId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    put:
+      summary: Set a provider agent's PayPal recipient (encrypted at rest)
+      description: Human sessions only. Requires consent=true. The value is never returned; only a mask is.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paypal_email, consent]
+              properties:
+                paypal_email: { type: string, format: email }
+                consent: { type: boolean }
+      responses:
+        "200": { description: Masked recipient, verification_status pending }
+        "400": { description: Invalid email or missing consent }
+    get:
+      summary: Masked recipient and verification status
+      description: Human sessions only. Agent principals receive 403.
+      responses:
+        "200": { description: Masked recipient or null }
+  /agents/{agentId}/payout-account/verify:
+    parameters:
+      - {
+          name: agentId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: A person confirms the masked recipient is correct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm_masked]
+              properties:
+                confirm_masked: { type: string }
+      responses:
+        "200": { description: Recipient verified }
+        "400": { description: Confirmation does not match }
+  /settlement/batches/{batchId}/payouts:
+    parameters:
+      - {
+          name: batchId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      summary: Providers in a batch with masked recipient, status and latest payout
+      description: Human sessions only. Agent principals receive 403.
+      responses:
+        "200": { description: Providers }
+    post:
+      summary: Send the approved PayPal payouts (Payouts API)
+      description: |
+        Requires an unused, unexpired approval from POST payout-approval. Re-checks recipient hash,
+        obligation set, amount and currency. 503 PAYPAL_PAYOUTS_UNAVAILABLE when the capability is not enabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approval_id]
+              properties:
+                approval_id: { type: string, format: uuid }
+      responses:
+        "200":
+          {
+            description: Payouts and per-provider errors; replayed=true when the approval was already used,
+          }
+        "403":
+          {
+            description: Approval missing,
+            expired,
+            or the recipient or amount changed (recorded as a substitution attempt),
+          }
+        "503": { description: PAYPAL_PAYOUTS_UNAVAILABLE }
+  /settlement/batches/{batchId}/payout-approval:
+    parameters:
+      - {
+          name: batchId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: Approve a provider payout (separate from collection approval)
+      description: Binds amount, currency, obligation ids hash, recipient snapshot hash and policy version. One-time, expires in 15 minutes.
+      responses:
+        "201": { description: Approval with masked recipients }
+        "422": { description: PAYOUT_ACCOUNT_MISSING or batch not confirmed }
+        "503": { description: PAYPAL_PAYOUTS_UNAVAILABLE }
+  /payouts/{payoutId}/refresh:
+    parameters:
+      - {
+          name: payoutId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: Query PayPal for the payout item and apply its status
+      description: A payout is paid only when PayPal reports the item SUCCESS. UNCLAIMED, PENDING and ONHOLD are not paid.
+      responses:
+        "200": { description: Payout }
+  /money-flow:
+    get:
+      summary: Agreements with their buyer-collection and provider-disbursement legs
+      description: Human sessions only. Agent principals receive 403.
+      responses:
+        "200":
+          description: Flows and the payouts capability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payouts_capability:
+                    type: object
+                    properties:
+                      status:
+                        {
+                          type: string,
+                          enum: [enabled, blocked, unknown, degraded],
+                        }
+                      enabled: { type: boolean }
+                      reason: { type: [string, "null"] }
+                  flows: { type: array, items: { type: object } }
+  /missions/{missionId}/negotiate:
+    parameters:
+      - {
+          name: missionId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: Buyer agent compares open offers and may counteroffer (real model call)
+      description: |
+        The model proposes; deterministic validation decides. Returns the comparison, each counteroffer with its
+        deterministic verdict and reason codes, and a server-built selection. 503 LLM_NOT_CONFIGURED without a model key.
+      responses:
+        "200": { description: Negotiation result }
+        "422": { description: AGENT_OUTPUT_INVALID }
+  /missions/{missionId}/proposals:
+    parameters:
+      - {
+          name: missionId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      summary: Stored commercial proposals (comparison, counteroffers, selection) with prompt hash and model id
+      responses:
+        "200": { description: Proposals }
+  # ── v2.1 Mission budget wallet ───────────────────────────────────────────
+  # Money-boundary rules for every /wallet, /notifications, /analytics/wallet and /admin wallet route:
+  #  * Human sessions only. An agent principal receives 403 FORBIDDEN_ACTION and one audit row.
+  #  * Every amount is a Decimal string (never a JSON number). Currency is an ISO 4217 code.
+  #  * The wallet, owner and tenant come from the authenticated principal. A wallet_id, owner_id,
+  #    user_id or tenant_id in a body is ignored.
+  #  * No request or response carries a recipient, payee, payment-source or credential field. A
+  #    request that names one is rejected with 400 VALIDATION_FAILED.
+  #  * Every state-changing money POST needs an Idempotency-Key header (1 to 200 characters).
+  /admin/funding-mode:
+    get:
+      summary: Tenant funding mode (direct or wallet)
+      description: Operator or supervisor sessions only.
+      operationId: getFundingMode
+      responses:
+        "200":
+          description: Current mode
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FundingModeResponse" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      summary: Switch the tenant funding mode
+      description: >-
+        Operator or supervisor sessions only. Refused with 409 FUNDING_MODE_BUSY while any agreement
+        accepted under the old mode is still live (accepted, revision_requested, needs_review).
+      operationId: setFundingMode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [funding_mode]
+              properties:
+                funding_mode: { $ref: "#/components/schemas/FundingMode" }
+      responses:
+        "200":
+          description: Mode after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FundingModeResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /wallet:
+    get:
+      summary: The signed-in person's wallets (one per currency), funding mode and PayPal environment
+      operationId: getWallet
+      responses:
+        "200":
+          description: Wallets with Decimal-string balances
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletOverview" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Create the signed-in person's wallet for one supported currency (idempotent, moves no money)
+      operationId: createWallet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currency]
+              properties:
+                currency: { type: string, pattern: "^[A-Za-z]{3}$" }
+      responses:
+        "201":
+          description: The wallet (existing one when already created)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Wallet" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /wallet/account:
+    get:
+      summary: The signed-in person's account view (wallets, deposits, reservations, charges, refunds)
+      operationId: getWalletAccount
+      responses:
+        "200":
+          description: Account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserAccount" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /wallet/statement:
+    get:
+      summary: Statement of the signed-in person's wallet, newest activity with running balance
+      description: Name `currency` when the person has more than one wallet (400 VALIDATION_FAILED otherwise). No wallet yet returns an empty statement with balance "0".
+      operationId: getWalletStatement
+      parameters:
+        - {
+            name: currency,
+            in: query,
+            required: false,
+            schema: { type: string, pattern: "^[A-Za-z]{3}$" },
+          }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: Statement page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Statement" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /wallet/deposits:
+    get:
+      summary: Deposits (Owner's own; an Admin sees the tenant), newest first, at most 100
+      operationId: listDeposits
+      responses:
+        "200":
+          description: Deposits
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [paypal_environment, deposits]
+                properties:
+                  paypal_environment:
+                    { $ref: "#/components/schemas/PayPalEnvironment" }
+                  deposits:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Deposit" },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Create a PayPal Orders v2 deposit that funds the signed-in person's wallet
+      description: >-
+        Returns the deposit with an approve_url while status is awaiting_approval. The wallet is
+        credited only after PayPal confirms the capture. The same Idempotency-Key with the same body
+        returns the same deposit; the same key with a different body is 409 IDEMPOTENCY_CONFLICT.
+        Amount above the configured maximum is 400 VALIDATION_FAILED (reason EXCEEDS_MAX_DEPOSIT).
+        409 WALLET_NOT_ENABLED when the tenant funding mode is direct.
+      operationId: createDeposit
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DepositRequest" }
+      responses:
+        "201":
+          description: Deposit created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deposit" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502":
+          {
+            description: "PayPal rejected or could not complete the call (PAYPAL_REQUEST_REJECTED, PAYPAL_UNREACHABLE, PAYPAL_TIMEOUT, PAYPAL_BAD_RESPONSE)",
+          }
+        "503": { description: PAYPAL_NOT_CONFIGURED }
+  /wallet/deposits/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    get:
+      summary: One deposit (its Owner, or an Admin of the tenant)
+      description: Another tenant's deposit answers 404; another Owner's deposit in the same tenant answers 403 WALLET_NOT_OWNED.
+      operationId: getDeposit
+      responses:
+        "200":
+          description: Deposit
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deposit" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /wallet/deposits/{id}/refresh:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Ask PayPal where the deposit stands now and apply it (captures when the buyer approved)
+      operationId: refreshDeposit
+      responses:
+        "200":
+          description: Deposit after the sync
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deposit" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /wallet/missions:
+    get:
+      summary: Missions with their wallet funding view (Owner's own; an Admin sees the tenant), at most 100
+      operationId: listWalletMissions
+      responses:
+        "200":
+          description: Missions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [missions]
+                properties:
+                  missions:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/MissionWallet" },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /wallet/missions/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    get:
+      summary: Wallet funding view of one mission (its Owner, or an Admin of the tenant)
+      operationId: getWalletMission
+      responses:
+        "200":
+          description: Mission funding view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MissionWallet" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /wallet/missions/{id}/complete:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: The Owner marks the mission complete; unreserved funds become the Remainder awaiting a decision
+      description: Owner only (an Admin cannot complete on an Owner's behalf). Nothing is refunded by completing.
+      operationId: completeWalletMission
+      responses:
+        "200":
+          description: Mission funding view after completion
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MissionWallet" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /wallet/missions/{id}/remainder-prompt:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    get:
+      summary: Budget advisor text for the Remainder decision (display only)
+      description: >-
+        Owner only. 409 MISSION_NOT_AWAITING_DECISION unless the mission state is awaiting_decision.
+        The text is model-generated when a model key is configured and valid; otherwise fixed text
+        with ai_generated=false. The figures are server values; nothing here moves money.
+      operationId: getRemainderPrompt
+      responses:
+        "200":
+          description: Advice with server figures
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RemainderPrompt" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /wallet/missions/{id}/top-up:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Create a PayPal deposit that tops up an open mission
+      description: >-
+        Owner only. Currency defaults to the wallet currency; another currency is 400 VALIDATION_FAILED.
+        409 MISSION_NOT_OPEN once the mission is complete.
+      operationId: topUpMission
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { $ref: "#/components/schemas/Amount" }
+                currency: { type: string, pattern: "^[A-Z]{3}$" }
+      responses:
+        "201":
+          description: Deposit created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deposit" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /wallet/missions/{id}/remainder-decision:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: The Owner decides the Remainder - refund it to PayPal or keep it in the wallet
+      description: >-
+        Owner only; Idempotency-Key required. A person chooses; nothing is preselected. `amount` must
+        not exceed the Remainder (400 VALIDATION_FAILED, reason EXCEEDS_REMAINDER). Refunds go back to
+        the original PayPal captures; 409 REFUND_EXCEEDS_CAPTURES when they cannot cover it.
+        409 MISSION_NOT_AWAITING_DECISION when no Remainder is waiting.
+      operationId: decideRemainder
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [refund, keep] }
+                amount: { $ref: "#/components/schemas/Amount" }
+      responses:
+        "200":
+          description: Decision with the refund it started, if any
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RemainderDecision" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /wallet/refunds:
+    get:
+      summary: Refunds (Owner's own; an Admin sees the tenant), newest first, at most 100
+      operationId: listWalletRefunds
+      responses:
+        "200":
+          description: Refunds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [paypal_environment, refunds]
+                properties:
+                  paypal_environment:
+                    { $ref: "#/components/schemas/PayPalEnvironment" }
+                  refunds:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Refund" },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Refund unlinked wallet funds (not tied to a mission) back to PayPal
+      description: >-
+        Owner only; Idempotency-Key required. The wallet is the caller's own, picked by `currency`
+        (required when the caller has several). Amount above the Available_Balance is 400
+        VALIDATION_FAILED (reason EXCEEDS_AVAILABLE); above what the original captures can return is
+        409 REFUND_EXCEEDS_CAPTURES.
+      operationId: createWalletRefund
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { $ref: "#/components/schemas/Amount" }
+                currency: { type: string, pattern: "^[A-Z]{3}$" }
+      responses:
+        "201":
+          description: Refund created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refund" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /wallet/refunds/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    get:
+      summary: One refund with its per-capture items (its Owner, or an Admin of the tenant)
+      operationId: getWalletRefund
+      responses:
+        "200":
+          description: Refund
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refund" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /wallet/refunds/{id}/retry:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Retry the failed items of a refund
+      description: Idempotency-Key required. 409 REFUND_NOTHING_TO_RETRY when no item failed. Owner or Admin of the tenant.
+      operationId: retryWalletRefund
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200":
+          description: Refund after the retry
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refund" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /wallet/events:
+    get:
+      summary: Economic event history of a wallet, deposit or mission, oldest first, 100 per page
+      description: >-
+        Its Owner, or an Admin of the tenant. Anyone else gets 403 WALLET_NOT_OWNED with the same
+        body whether the entity is missing, in another tenant or someone else's.
+      operationId: listWalletEvents
+      parameters:
+        - {
+            name: entity_type,
+            in: query,
+            required: true,
+            schema:
+              {
+                type: string,
+                enum: [wallet, deposit, wallet_deposit, mission],
+              },
+          }
+        - {
+            name: entity_id,
+            in: query,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events, next_cursor]
+                properties:
+                  events:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/EconomicEvent" },
+                    }
+                  next_cursor: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /notifications:
+    get:
+      summary: The signed-in person's notifications, newest first
+      description: Recipient only; every query is keyed by the authenticated principal.
+      operationId: listNotifications
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: Notifications page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notifications, next_cursor]
+                properties:
+                  notifications:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Notification" },
+                    }
+                  next_cursor: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /notifications/unread-count:
+    get:
+      summary: Number of unread notifications
+      operationId: getUnreadNotificationCount
+      responses:
+        "200":
+          description: Count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unread_count]
+                properties:
+                  unread_count: { type: integer, minimum: 0 }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /notifications/{id}/read:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Mark one notification read
+      description: Someone else's or a missing notification answers 404 with no content.
+      operationId: markNotificationRead
+      responses:
+        "200":
+          description: Notification and the new unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notification, unread_count]
+                properties:
+                  notification: { $ref: "#/components/schemas/Notification" }
+                  unread_count: { type: integer, minimum: 0 }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /analytics/wallet/charts/{chart}:
+    parameters:
+      - {
+          name: chart,
+          in: path,
+          required: true,
+          schema:
+            {
+              type: string,
+              enum:
+                [
+                  balance-over-time,
+                  flows-per-day,
+                  charges-per-mission,
+                  budget-utilization,
+                  deposit-status,
+                  reconciliation-differences,
+                ],
+            },
+        }
+    get:
+      summary: Chart series over the caller's wallets (an Admin sees the tenant)
+      operationId: getWalletChart
+      responses:
+        "200":
+          description: Points; money values are Decimal strings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [chart, paypal_environment, points]
+                properties:
+                  chart: { type: string }
+                  paypal_environment:
+                    { $ref: "#/components/schemas/PayPalEnvironment" }
+                  points:
+                    {
+                      type: array,
+                      items: { type: object, additionalProperties: true },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /analytics/wallet/{dataset}:
+    parameters:
+      - name: dataset
+        in: path
+        required: true
+        description: One of deposits, reservations, charges, refunds, payouts, notifications, reconciliation-exceptions, ledger-lines, statements. Append .csv for a CSV export of every authorized row.
+        schema: { type: string }
+    get:
+      summary: Dataset rows (JSON page of at most 500) or CSV export
+      operationId: getWalletDataset
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - {
+            name: limit,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 500 },
+          }
+      responses:
+        "200":
+          description: JSON page, or text/csv (Content-Disposition attachment, no-store) for .csv
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsDatasetPage" }
+            text/csv:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/business-account:
+    get:
+      summary: Business account per currency - PayPal funds received, wallet balances held, allocations, payouts, refunds, revenue
+      description: Operator or supervisor sessions only.
+      operationId: getBusinessAccount
+      responses:
+        "200":
+          description: One row per currency
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [paypal_environment, currencies]
+                properties:
+                  paypal_environment:
+                    { $ref: "#/components/schemas/PayPalEnvironment" }
+                  currencies:
+                    {
+                      type: array,
+                      items:
+                        { $ref: "#/components/schemas/BusinessAccountRow" },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/trial-balance:
+    get:
+      summary: Ledger trial balance per currency
+      description: Operator or supervisor sessions only.
+      operationId: getTrialBalance
+      responses:
+        "200":
+          description: One row per currency
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [currencies]
+                properties:
+                  currencies:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/TrialBalanceRow" },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/wallets:
+    get:
+      summary: Every wallet of the tenant with balances
+      description: Operator or supervisor sessions only.
+      operationId: listAdminWallets
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - {
+            name: limit,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 200, default: 50 },
+          }
+      responses:
+        "200":
+          description: Wallet page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [wallets, next_cursor]
+                properties:
+                  wallets:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/AdminWallet" },
+                    }
+                  next_cursor: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/wallets/{walletId}/statement:
+    parameters:
+      - {
+          name: walletId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      summary: Statement of any wallet in the tenant
+      description: Operator or supervisor sessions only.
+      operationId: getAdminWalletStatement
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: Statement page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Statement" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/wallets/{walletId}/refunds:
+    parameters:
+      - {
+          name: walletId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: Admin refund of wallet funds back to PayPal, with a stated reason
+      description: >-
+        The only Admin money path. Human operator or supervisor sessions only; Idempotency-Key and a
+        reason are required. Money returns to the original PayPal captures, never to a recipient the
+        request names.
+      operationId: createAdminRefund
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, reason]
+              properties:
+                amount: { $ref: "#/components/schemas/Amount" }
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "201":
+          description: Refund created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Refund" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /admin/users/{userId}/wallet-account:
+    parameters:
+      - {
+          name: userId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    get:
+      summary: Account view of any user in the tenant
+      description: Operator or supervisor sessions only. A user in another tenant answers 404.
+      operationId: getAdminUserWalletAccount
+      responses:
+        "200":
+          description: Account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserAccount" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/journal/transactions/{id}/reverse:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Post a reversing entry for a journal transaction
+      description: >-
+        Operator or supervisor sessions only; a reason of 1 to 500 characters is required. The server
+        swaps every line of the original; the amount is never taken from the request. Re-checks the
+        wallet balance and lifts a balance_mismatch block when derived equals stored.
+        409 ALREADY_REVERSED when the transaction was reversed before.
+      operationId: reverseJournalTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "201":
+          description: Reversal posted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalReversal" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /admin/reconciliation/runs:
+    get:
+      summary: Reconciliation runs against PayPal, newest first
+      description: Operator or supervisor sessions only.
+      operationId: listReconciliationRuns
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - {
+            name: limit,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 200, default: 50 },
+          }
+      responses:
+        "200":
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs, next_cursor]
+                properties:
+                  runs:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/ReconciliationRun" },
+                    }
+                  next_cursor: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Start a reconciliation run now
+      description: >-
+        Operator or supervisor sessions only. Reads PayPal and compares; never changes a balance,
+        reservation or journal line. 409 RECONCILIATION_IN_PROGRESS when a run is already active.
+      operationId: startReconciliationRun
+      responses:
+        "201":
+          description: Finished run with its exceptions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReconciliationRun" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /admin/reconciliation/runs/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    get:
+      summary: One reconciliation run with its exceptions
+      description: Operator or supervisor sessions only.
+      operationId: getReconciliationRun
+      responses:
+        "200":
+          description: Run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReconciliationRun" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/reconciliation/exceptions:
+    get:
+      summary: Reconciliation exceptions, open or resolved
+      description: Operator or supervisor sessions only.
+      operationId: listReconciliationExceptions
+      parameters:
+        - {
+            name: status,
+            in: query,
+            required: false,
+            schema: { type: string, enum: [open, resolved] },
+          }
+        - { $ref: "#/components/parameters/Cursor" }
+        - {
+            name: limit,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 200, default: 50 },
+          }
+      responses:
+        "200":
+          description: Exceptions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [exceptions, next_cursor]
+                properties:
+                  exceptions:
+                    {
+                      type: array,
+                      items:
+                        {
+                          $ref: "#/components/schemas/ReconciliationException",
+                        },
+                    }
+                  next_cursor: { type: [string, "null"] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  # ── Legacy budgets: the debit route is deprecated and money-inert ─────────
+  /budgets/{budgetId}:
+    parameters:
+      - {
+          name: budgetId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    patch:
+      summary: Edit a budget still waiting for PayPal approval
+      description: >-
+        Human owner or Admin only (agents get 403). Stoat first checks PayPal; if the buyer already
+        approved the order the budget activates and the edit is refused (409 BUDGET_ALREADY_APPROVED).
+        Otherwise a new PayPal order is created with the new terms and the old budget is cancelled
+        and hidden. If PayPal cannot create the new order, the old budget is left unchanged.
+      operationId: editPendingBudget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: string, description: "Decimal string greater than 0" }
+                currency: { type: string, pattern: "^[A-Za-z]{3}$" }
+                mission_id: { type: string, format: uuid, nullable: true }
+      responses:
+        "200": { description: "The new budget and the retired one ({ budget, replaced })" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      summary: Delete a budget PayPal never approved
+      description: >-
+        Human owner or Admin only. The budget is cancelled and hidden from the list (GET
+        /v1/budgets?status=cancelled still shows it); its events are kept. Refused with 409 when
+        PayPal reports the order approved, or 503 BUDGET_PAYPAL_UNVERIFIED when PayPal cannot be
+        reached. An order PayPal no longer knows (expired) can be deleted.
+      operationId: deletePendingBudget
+      responses:
+        "200": { description: "{ budget, deleted: true }" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /budgets/{budgetId}/sync:
+    parameters:
+      - {
+          name: budgetId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      summary: Check PayPal for a budget pending approval and activate it if the buyer approved
+      description: >-
+        Human buyer or operator only (agents get 403). Stoat reads the order at PayPal; only an
+        APPROVED or COMPLETED order is captured and reconciled, and the budget becomes active.
+        Otherwise the budget is returned unchanged. Idempotent. The PayPal return handler and a
+        30-second sweep do the same automatically.
+      operationId: syncBudget
+      responses:
+        "200": { description: "The budget after the check" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /budgets/{budgetId}/debit:
+    parameters:
+      - {
+          name: budgetId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+    post:
+      deprecated: true
+      summary: DEPRECATED - debits nothing; charges arise only from verified obligations
+      description: >-
+        Only the budget's human Owner may call it. It never debits and never changes a balance.
+        Every success carries `Deprecation: true` and `Sunset: Thu, 31 Dec 2026 23:59:59 GMT`.
+        An agent principal, or a person who is not the Owner, gets 403 FORBIDDEN_ACTION and one audit
+        row. A body containing `amount` is 400 VALIDATION_FAILED. Unknown budget is 404.
+      operationId: debitBudgetDeprecated
+      responses:
+        "200":
+          description: Acknowledgement that nothing was debited
+          headers:
+            Deprecation: { schema: { type: string, example: "true" } }
+            Sunset: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deprecated, debited, message]
+                properties:
+                  deprecated: { type: boolean, const: true }
+                  debited: { type: boolean, const: false }
+                  message: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 components:
   securitySchemes:
     bearerAuth:
@@ -141,7 +1535,688 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 1 to 200 characters. Repeating a request with the same key and body returns the first result; the same key with a different body is 409 IDEMPOTENCY_CONFLICT. A missing or out-of-range key is 400 VALIDATION_FAILED.
+      schema: { type: string, minLength: 1, maxLength: 200 }
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque cursor from a previous page's next_cursor. An invalid cursor is 400 VALIDATION_FAILED.
+      schema: { type: string, maxLength: 500 }
   schemas:
+    DecimalString:
+      type: string
+      pattern: '^-?(0|[1-9][0-9]*)(\.[0-9]+)?$'
+      description: Money as a decimal string, never a JSON number. May be negative only where a signed figure is stated (statement lines, differences).
+      examples: ["0", "12.50"]
+    PayPalEnvironment:
+      type: string
+      enum: [sandbox, live]
+    FundingMode:
+      type: string
+      enum: [direct, wallet]
+    FundingModeResponse:
+      type: object
+      required: [funding_mode]
+      properties:
+        funding_mode: { $ref: "#/components/schemas/FundingMode" }
+    Wallet:
+      type: object
+      required:
+        [
+          id,
+          currency,
+          status,
+          paypal_environment,
+          balance,
+          reserved,
+          pending_refund,
+          available,
+          deposited,
+          charged,
+          refunded,
+          funding_mode,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        status: { type: string, description: "active or blocked" }
+        paypal_environment: { $ref: "#/components/schemas/PayPalEnvironment" }
+        balance: { $ref: "#/components/schemas/DecimalString" }
+        reserved: { $ref: "#/components/schemas/DecimalString" }
+        pending_refund: { $ref: "#/components/schemas/DecimalString" }
+        available: { $ref: "#/components/schemas/DecimalString" }
+        deposited: { $ref: "#/components/schemas/DecimalString" }
+        charged: { $ref: "#/components/schemas/DecimalString" }
+        refunded: { $ref: "#/components/schemas/DecimalString" }
+        funding_mode: { $ref: "#/components/schemas/FundingMode" }
+    WalletOverview:
+      type: object
+      required: [funding_mode, paypal_environment, wallets]
+      properties:
+        funding_mode: { $ref: "#/components/schemas/FundingMode" }
+        paypal_environment: { $ref: "#/components/schemas/PayPalEnvironment" }
+        wallets: { type: array, items: { $ref: "#/components/schemas/Wallet" } }
+    AdminWallet:
+      type: object
+      required:
+        [
+          id,
+          owner_user_id,
+          currency,
+          status,
+          paypal_environment,
+          balance,
+          reserved,
+          pending_refund,
+          available,
+          deposited,
+          charged,
+          refunded,
+          last_activity_at,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        owner_user_id: { type: string, format: uuid }
+        currency: { type: string }
+        status: { type: string }
+        paypal_environment: { $ref: "#/components/schemas/PayPalEnvironment" }
+        balance: { $ref: "#/components/schemas/DecimalString" }
+        reserved: { $ref: "#/components/schemas/DecimalString" }
+        pending_refund: { $ref: "#/components/schemas/DecimalString" }
+        available: { $ref: "#/components/schemas/DecimalString" }
+        deposited: { $ref: "#/components/schemas/DecimalString" }
+        charged: { $ref: "#/components/schemas/DecimalString" }
+        refunded: { $ref: "#/components/schemas/DecimalString" }
+        last_activity_at: { type: [string, "null"], format: date-time }
+    DepositRequest:
+      type: object
+      required: [amount, currency]
+      description: Only these fields are read. wallet_id, owner_id, user_id and tenant_id are ignored; any payee, recipient, receiver or payment-source field is rejected with 400 VALIDATION_FAILED.
+      properties:
+        amount: { $ref: "#/components/schemas/Amount" }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        mission_id: { type: [string, "null"], format: uuid }
+    Deposit:
+      type: object
+      required:
+        [
+          id,
+          wallet_id,
+          mission_id,
+          is_top_up,
+          status,
+          amount,
+          currency,
+          credited_amount,
+          paypal_environment,
+          paypal_order_id,
+          approve_url,
+          failure_reason,
+          created_at,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        mission_id: { type: [string, "null"], format: uuid }
+        is_top_up: { type: boolean }
+        status:
+          {
+            type: string,
+            description: "awaiting_approval, awaiting_capture, captured, failed, expired, cancelled or creation_failed",
+          }
+        amount: { $ref: "#/components/schemas/DecimalString" }
+        currency: { type: string }
+        credited_amount: { $ref: "#/components/schemas/DecimalString" }
+        paypal_environment: { $ref: "#/components/schemas/PayPalEnvironment" }
+        paypal_order_id: { type: [string, "null"] }
+        approve_url:
+          {
+            type: [string, "null"],
+            description: Present only while status is awaiting_approval.,
+          }
+        failure_reason: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    MissionWallet:
+      type: object
+      required:
+        [
+          mission_id,
+          title,
+          mission_status,
+          currency,
+          budget,
+          available,
+          shortfall,
+          reserved,
+          charged,
+          unreserved_funding,
+          state,
+        ]
+      properties:
+        mission_id: { type: string, format: uuid }
+        title: { type: string }
+        mission_status: { type: string }
+        currency: { type: string }
+        budget: { $ref: "#/components/schemas/DecimalString" }
+        available: { $ref: "#/components/schemas/DecimalString" }
+        shortfall: { $ref: "#/components/schemas/DecimalString" }
+        reserved: { $ref: "#/components/schemas/DecimalString" }
+        charged: { $ref: "#/components/schemas/DecimalString" }
+        unreserved_funding: { $ref: "#/components/schemas/DecimalString" }
+        state:
+          {
+            type: string,
+            description: "For example funded, partially_funded, awaiting_decision, depleted, completed.",
+          }
+    RemainderPrompt:
+      type: object
+      required:
+        [
+          mission_id,
+          paypal_environment,
+          figures,
+          advice,
+          ai_generated,
+          label,
+          display_only,
+        ]
+      properties:
+        mission_id: { type: string, format: uuid }
+        paypal_environment: { $ref: "#/components/schemas/PayPalEnvironment" }
+        figures:
+          type: object
+          required:
+            [currency, budget, available, charged, reserved, shortfall, state]
+          properties:
+            currency: { type: string }
+            budget: { $ref: "#/components/schemas/DecimalString" }
+            available: { $ref: "#/components/schemas/DecimalString" }
+            charged: { $ref: "#/components/schemas/DecimalString" }
+            reserved: { $ref: "#/components/schemas/DecimalString" }
+            shortfall: { $ref: "#/components/schemas/DecimalString" }
+            state: { type: string }
+        advice: { type: string }
+        ai_generated: { type: boolean }
+        label: { type: string }
+        fallback_reason: { type: [string, "null"] }
+        run_id: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        mode: { type: [string, "null"] }
+        replayed: { type: [boolean, "null"] }
+        schema_version: { type: [string, "null"] }
+        display_only: { type: boolean, const: true }
+    RefundItem:
+      type: object
+      required: [id, deposit_id, paypal_capture_id, amount, status, attempts]
+      properties:
+        id: { type: string, format: uuid }
+        deposit_id: { type: string, format: uuid }
+        paypal_capture_id: { type: string }
+        amount: { $ref: "#/components/schemas/DecimalString" }
+        status:
+          {
+            type: string,
+            description: "planned, submitted, completed, pending or failed",
+          }
+        paypal_refund_id: { type: [string, "null"] }
+        paypal_status: { type: [string, "null"] }
+        failure_reason: { type: [string, "null"] }
+        attempts: { type: integer, minimum: 0 }
+    Refund:
+      type: object
+      required:
+        [
+          id,
+          wallet_id,
+          kind,
+          amount,
+          currency,
+          status,
+          paypal_environment,
+          created_at,
+          updated_at,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        kind: { type: string, enum: [remainder, unlinked, admin] }
+        mission_id: { type: [string, "null"], format: uuid }
+        decision_id: { type: [string, "null"], format: uuid }
+        amount: { $ref: "#/components/schemas/DecimalString" }
+        currency: { type: string }
+        status: { type: string }
+        actor_user_id: { type: [string, "null"], format: uuid }
+        actor_role: { type: [string, "null"] }
+        reason: { type: [string, "null"] }
+        paypal_environment: { $ref: "#/components/schemas/PayPalEnvironment" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        items:
+          { type: array, items: { $ref: "#/components/schemas/RefundItem" } }
+    RemainderDecision:
+      type: object
+      required:
+        [
+          id,
+          mission_id,
+          wallet_id,
+          decision,
+          remainder_amount,
+          refund_amount,
+          decided_by,
+          decided_at,
+          refund,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        mission_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        decision: { type: string, enum: [refund, keep] }
+        remainder_amount: { $ref: "#/components/schemas/DecimalString" }
+        refund_amount: { $ref: "#/components/schemas/DecimalString" }
+        decided_by: { type: string, format: uuid }
+        decided_at: { type: string, format: date-time }
+        refund:
+          oneOf:
+            - { $ref: "#/components/schemas/Refund" }
+            - { type: "null" }
+    Notification:
+      type: object
+      required: [id, kind, title, body, created_at, read_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        title: { type: string }
+        body: { type: string }
+        entity_type: { type: [string, "null"] }
+        entity_id: { type: [string, "null"] }
+        mission_id: { type: [string, "null"], format: uuid }
+        link:
+          {
+            type: [string, "null"],
+            description: Navigation only; never a state-changing URL.,
+          }
+        created_at: { type: string, format: date-time }
+        read_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: [string, "null"], format: date-time }
+        resolved_at: { type: [string, "null"], format: date-time }
+    EconomicEvent:
+      type: object
+      required:
+        [
+          id,
+          aggregate_type,
+          aggregate_id,
+          sequence,
+          event_type,
+          actor_type,
+          tenant_id,
+          correlation_id,
+          recorded_at,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        aggregate_type: { type: string }
+        aggregate_id: { type: string, format: uuid }
+        sequence: { type: integer }
+        event_type: { type: string }
+        actor_type: { type: string }
+        actor_role: { type: [string, "null"] }
+        actor_id: { type: [string, "null"] }
+        tenant_id: { type: string, format: uuid }
+        correlation_id: { type: string }
+        amount:
+          {
+            oneOf:
+              [
+                { $ref: "#/components/schemas/DecimalString" },
+                { type: "null" },
+              ],
+          }
+        currency: { type: [string, "null"] }
+        recorded_at: { type: string, format: date-time }
+        paypal_order_id: { type: [string, "null"] }
+        paypal_capture_id: { type: [string, "null"] }
+        paypal_refund_id: { type: [string, "null"] }
+        paypal_payout_batch_id: { type: [string, "null"] }
+        paypal_request_id: { type: [string, "null"] }
+    StatementLine:
+      type: object
+      required: [kind, amount, currency, occurred_at]
+      properties:
+        id: { type: [string, "null"] }
+        wallet_id: { type: string, format: uuid }
+        kind:
+          {
+            type: string,
+            enum: [deposit, charge, refund, reversal, adjustment],
+          }
+        description: { type: [string, "null"] }
+        amount: { $ref: "#/components/schemas/DecimalString" }
+        currency: { type: string }
+        balance_after:
+          {
+            oneOf:
+              [
+                { $ref: "#/components/schemas/DecimalString" },
+                { type: "null" },
+              ],
+          }
+        entity_type: { type: [string, "null"] }
+        entity_id: { type: [string, "null"] }
+        paypal_environment: { type: [string, "null"] }
+        occurred_at: { type: string, format: date-time }
+    Statement:
+      type: object
+      required:
+        [wallet_id, currency, paypal_environment, balance, lines, next_cursor]
+      properties:
+        wallet_id: { type: [string, "null"], format: uuid }
+        currency: { type: [string, "null"] }
+        paypal_environment: { $ref: "#/components/schemas/PayPalEnvironment" }
+        balance: { $ref: "#/components/schemas/DecimalString" }
+        lines:
+          { type: array, items: { $ref: "#/components/schemas/StatementLine" } }
+        next_cursor: { type: [string, "null"] }
+    UserAccount:
+      type: object
+      required: [user_id, wallets]
+      properties:
+        user_id: { type: string, format: uuid }
+        wallets:
+          type: array
+          items:
+            type: object
+            required: [wallet, deposits, reservations, charges, refunds]
+            properties:
+              wallet: { $ref: "#/components/schemas/Wallet" }
+              deposits:
+                {
+                  type: array,
+                  items:
+                    {
+                      type: object,
+                      additionalProperties: true,
+                      description: "id, mission_id, status, amount, credited_amount, currency, paypal_order_id, paypal_capture_id, created_at",
+                    },
+                }
+              reservations:
+                {
+                  type: array,
+                  items:
+                    {
+                      type: object,
+                      additionalProperties: true,
+                      description: "id, mission_id, agreement_id, status, amount, currency, created_at",
+                    },
+                }
+              charges:
+                {
+                  type: array,
+                  items:
+                    {
+                      type: object,
+                      additionalProperties: true,
+                      description: "id, mission_id, obligation_id, amount, currency, created_at",
+                    },
+                }
+              refunds:
+                {
+                  type: array,
+                  items:
+                    {
+                      type: object,
+                      additionalProperties: true,
+                      description: "id, kind, status, amount, currency, paypal_refund_ids, created_at",
+                    },
+                }
+    BusinessAccountRow:
+      type: object
+      required:
+        [
+          currency,
+          paypal_funds_received,
+          wallet_balance_held,
+          funds_allocated_to_providers,
+          provider_payouts_completed,
+          refunds_completed,
+          platform_revenue,
+          wallet_balance_sum,
+          difference,
+        ]
+      properties:
+        currency: { type: string }
+        paypal_funds_received: { $ref: "#/components/schemas/DecimalString" }
+        wallet_balance_held: { $ref: "#/components/schemas/DecimalString" }
+        funds_allocated_to_providers:
+          { $ref: "#/components/schemas/DecimalString" }
+        provider_payouts_completed:
+          { $ref: "#/components/schemas/DecimalString" }
+        refunds_completed: { $ref: "#/components/schemas/DecimalString" }
+        platform_revenue: { $ref: "#/components/schemas/DecimalString" }
+        wallet_balance_sum: { $ref: "#/components/schemas/DecimalString" }
+        difference: { $ref: "#/components/schemas/DecimalString" }
+    TrialBalanceRow:
+      type: object
+      required: [currency, total_debits, total_credits, difference, balanced]
+      properties:
+        currency: { type: string }
+        total_debits: { $ref: "#/components/schemas/DecimalString" }
+        total_credits: { $ref: "#/components/schemas/DecimalString" }
+        difference: { $ref: "#/components/schemas/DecimalString" }
+        balanced: { type: boolean }
+    JournalReversal:
+      type: object
+      required: [original_transaction_id, reversal_transaction_id, wallets]
+      properties:
+        original_transaction_id: { type: string, format: uuid }
+        reversal_transaction_id: { type: string, format: uuid }
+        wallets:
+          type: array
+          items:
+            type: object
+            required: [wallet_id, status, block_lifted]
+            properties:
+              wallet_id: { type: string, format: uuid }
+              status: { type: string }
+              block_lifted: { type: boolean }
+    ReconciliationException:
+      type: object
+      required: [id, item_type, paypal_id, kind, status, created_at, detail]
+      properties:
+        id: { type: string, format: uuid }
+        item_type: { type: string }
+        paypal_id: { type: string }
+        kind: { type: string }
+        currency: { type: [string, "null"] }
+        stoat_amount:
+          {
+            oneOf:
+              [
+                { $ref: "#/components/schemas/DecimalString" },
+                { type: "null" },
+              ],
+          }
+        paypal_amount:
+          {
+            oneOf:
+              [
+                { $ref: "#/components/schemas/DecimalString" },
+                { type: "null" },
+              ],
+          }
+        difference:
+          {
+            oneOf:
+              [
+                { $ref: "#/components/schemas/DecimalString" },
+                { type: "null" },
+              ],
+          }
+        status: { type: string, enum: [open, resolved] }
+        first_run_id: { type: string, format: uuid }
+        last_run_id: { type: string, format: uuid }
+        resolved_at: { type: [string, "null"], format: date-time }
+        resolved_run_id: { type: [string, "null"], format: uuid }
+        created_at: { type: string, format: date-time }
+        detail:
+          {
+            type: object,
+            additionalProperties: { type: [string, number, boolean, "null"] },
+          }
+    ReconciliationRun:
+      type: object
+      required:
+        [
+          id,
+          trigger,
+          status,
+          paypal_environment,
+          started_at,
+          finished_at,
+          counts,
+          totals,
+          trial_balance,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        trigger: { type: string }
+        status: { type: string }
+        paypal_environment: { $ref: "#/components/schemas/PayPalEnvironment" }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+          description: orders, captures, refunds, payouts, new_exceptions, open_exceptions, resolved_exceptions, unverifiable
+        totals:
+          type: object
+          description: Per currency, then captures, refunds and payouts, each with stoat and paypal Decimal strings.
+          additionalProperties: { type: object, additionalProperties: true }
+        trial_balance:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/TrialBalanceRow" },
+          }
+        exceptions:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/ReconciliationException" },
+          }
+    AnalyticsDatasetPage:
+      type: object
+      required: [dataset, paypal_environment, columns, rows, next_cursor]
+      properties:
+        dataset: { type: string }
+        paypal_environment: { $ref: "#/components/schemas/PayPalEnvironment" }
+        columns:
+          type: array
+          items:
+            type: object
+            required: [name, type]
+            properties:
+              name: { type: string }
+              type:
+                {
+                  type: string,
+                  description: "money columns are returned as Decimal strings",
+                }
+        rows:
+          {
+            type: array,
+            maxItems: 500,
+            items: { type: object, additionalProperties: true },
+          }
+        next_cursor: { type: [string, "null"] }
+    WalletErrorCode:
+      type: string
+      description: >-
+        Values of error.code on wallet routes. 400: VALIDATION_FAILED (details.field and, where
+        relevant, details.reason such as EXCEEDS_AVAILABLE, EXCEEDS_REMAINDER, EXCEEDS_MAX_DEPOSIT,
+        TOO_MANY_DECIMALS, INVALID_AMOUNT). 403: FORBIDDEN_ACTION (agent principal or wrong role),
+        WALLET_NOT_OWNED. 404: NOT_FOUND. 409: IDEMPOTENCY_CONFLICT, WALLET_NOT_ENABLED,
+        WALLET_BLOCKED, WALLET_ENVIRONMENT_MISMATCH, WALLET_OWNER_UNRESOLVED, MISSION_NOT_OPEN,
+        MISSION_NOT_AWAITING_DECISION, REFUND_EXCEEDS_CAPTURES,
+        REFUND_NOTHING_TO_RETRY, ALREADY_REVERSED, RECONCILIATION_IN_PROGRESS, FUNDING_MODE_BUSY.
+        422/502/503: PAYPAL_REQUEST_REJECTED (422 for a PayPal 4xx, 502 for a 5xx), PAYPAL_AUTH_FAILED, PAYPAL_UNREACHABLE, PAYPAL_TIMEOUT, PAYPAL_BAD_RESPONSE, PAYPAL_NOT_CONFIGURED (503), LLM_NOT_CONFIGURED (503).
+      enum:
+        - VALIDATION_FAILED
+        - FORBIDDEN_ACTION
+        - WALLET_NOT_OWNED
+        - NOT_FOUND
+        - IDEMPOTENCY_CONFLICT
+        - WALLET_NOT_ENABLED
+        - WALLET_BLOCKED
+        - WALLET_ENVIRONMENT_MISMATCH
+        - WALLET_OWNER_UNRESOLVED
+        - MISSION_NOT_OPEN
+        - MISSION_NOT_AWAITING_DECISION
+        - REFUND_EXCEEDS_CAPTURES
+        - REFUND_NOTHING_TO_RETRY
+        - ALREADY_REVERSED
+        - RECONCILIATION_IN_PROGRESS
+        - FUNDING_MODE_BUSY
+        - PAYPAL_REQUEST_REJECTED
+        - PAYPAL_AUTH_FAILED
+        - PAYPAL_UNREACHABLE
+        - PAYPAL_TIMEOUT
+        - PAYPAL_BAD_RESPONSE
+        - PAYPAL_NOT_CONFIGURED
+        - LLM_NOT_CONFIGURED
+    SignupRequest:
+      type: object
+      required: [email, password, organization_name]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password:
+          { type: string, minLength: 12, maxLength: 128, writeOnly: true }
+        organization_name: { type: string, minLength: 1, maxLength: 120 }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, writeOnly: true }
+    AgentLoginRequest:
+      type: object
+      required: [agent_id, secret]
+      properties:
+        agent_id: { type: string, format: uuid }
+        secret: { type: string, writeOnly: true }
+    ProvisionAgentRequest:
+      type: object
+      required: [name, role]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        role: { type: string, enum: [buyer, provider] }
+    PublishServiceRequest:
+      type: object
+      required: [name, description, category, unit_price, currency, unit]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, minLength: 1, maxLength: 2000 }
+        category: { type: string, pattern: "^[a-z][a-z0-9_]{1,63}$" }
+        unit_price: { $ref: "#/components/schemas/Amount" }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        unit: { type: string, minLength: 1, maxLength: 40 }
+        min_price:
+          $ref: "#/components/schemas/Amount"
+          description: Optional private negotiation floor; never returned to buyers.
+        execution_mode:
+          type: string
+          enum: [hosted, external]
+          default: external
+          description: hosted = Stoat runs the model review once the deal is ready (accepted, or paid when funding is required); external = the provider agent delivers through POST /artifacts and POST /deliveries.
     Amount:
       type: string
       pattern: '^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$'
@@ -183,6 +2258,11 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
     Conflict:
       description: State or idempotency conflict
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Invalid or expired credentials
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

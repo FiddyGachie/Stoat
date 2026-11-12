@@ -1,7 +1,7 @@
 import { DbClient } from '../../db/connection.js';
 import { Decimal } from 'decimal.js';
 import { EventsService } from '../events/events.service.js';
-import { ValidationError, NotFoundError } from '../../common/errors.js';
+import { ValidationError, NotFoundError, ConflictError } from '../../common/errors.js';
 import { toDecimalString } from '../../common/decimal.js';
 
 export interface RequestQuoteInput {
@@ -26,11 +26,14 @@ export class QuotesService {
   async requestQuote(input: RequestQuoteInput): Promise<any> {
     // 1. Verify mission
     const missionRes = await this.db.query(
-      'SELECT id, budget, reserved_budget, currency, status FROM missions WHERE id = $1 AND tenant_id = $2',
+      'SELECT id, buyer_id, budget, reserved_budget, currency, status FROM missions WHERE id = $1 AND tenant_id = $2',
       [input.missionId, input.tenantId]
     );
-    if (missionRes.rows.length === 0) {
+    if (missionRes.rows.length === 0 || missionRes.rows[0].buyer_id !== input.buyerId) {
       throw new NotFoundError('Mission', input.missionId);
+    }
+    if (missionRes.rows[0].status !== 'created') {
+      throw new ConflictError('MISSION_NOT_OPEN', `This mission is '${missionRes.rows[0].status}', so it cannot take new quotes.`);
     }
 
     // 2. Verify service
@@ -130,14 +133,14 @@ export class QuotesService {
     return quote;
   }
 
-  async getQuote(tenantId: string, quoteId: string): Promise<any> {
+  async getQuote(tenantId: string, quoteId: string, buyerId?: string): Promise<any> {
     const res = await this.db.query(
       `SELECT q.id, q.quote_request_id, q.service_id, q.provider_id, q.price, q.currency,
               q.terms, q.expires_at, q.status, q.created_at, qr.mission_id
        FROM quotes q
        LEFT JOIN quote_requests qr ON qr.id = q.quote_request_id
-       WHERE q.tenant_id = $1 AND q.id = $2`,
-      [tenantId, quoteId]
+       WHERE q.tenant_id = $1 AND q.id = $2 AND ($3::uuid IS NULL OR qr.buyer_id = $3)`,
+      [tenantId, quoteId, buyerId ?? null]
     );
 
     if (res.rows.length === 0) {
@@ -150,5 +153,32 @@ export class QuotesService {
       price: String(row.price),
       terms: typeof row.terms === 'string' ? JSON.parse(row.terms) : row.terms,
     };
+  }
+
+  async listMissionQuotes(tenantId: string, missionId: string, buyerId?: string): Promise<any[]> {
+    const mission = await this.db.query(
+      `SELECT id FROM missions
+       WHERE tenant_id = $1 AND id = $2 AND ($3::uuid IS NULL OR buyer_id = $3)`,
+      [tenantId, missionId, buyerId ?? null],
+    );
+    if (mission.rows.length === 0) throw new NotFoundError("Mission", missionId);
+
+    const result = await this.db.query(
+      `SELECT q.id, q.quote_request_id, q.service_id, s.name AS service_name,
+              q.provider_id, q.price, q.currency, q.terms, q.expires_at, q.status,
+              q.created_at, a.id AS agreement_id, a.status AS agreement_status, a.funding_status
+       FROM quote_requests qr
+       JOIN quotes q ON q.quote_request_id = qr.id AND q.tenant_id = qr.tenant_id
+       JOIN services s ON s.id = q.service_id AND s.tenant_id = q.tenant_id
+       LEFT JOIN agreements a ON a.quote_id = q.id AND a.tenant_id = q.tenant_id
+       WHERE qr.tenant_id = $1 AND qr.mission_id = $2
+       ORDER BY q.created_at DESC`,
+      [tenantId, missionId],
+    );
+    return result.rows.map((row) => ({
+      ...row,
+      price: String(row.price),
+      terms: typeof row.terms === "string" ? JSON.parse(row.terms) : row.terms,
+    }));
   }
 }

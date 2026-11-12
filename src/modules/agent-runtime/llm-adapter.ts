@@ -1,6 +1,6 @@
 /**
- * LLM Adapter — supports Fireworks AI serverless (primary), Anthropic (legacy), and a
- * deterministic fallback for tests / offline use.
+ * LLM Adapter: Fireworks AI serverless (primary) and Anthropic (legacy). There is no canned
+ * fallback; tests inject an explicit transport (a test double).
  *
  * Fireworks AI uses an OpenAI-compatible chat-completions endpoint:
  *   POST https://api.fireworks.ai/inference/v1/chat/completions
@@ -11,6 +11,10 @@
  *   fireworks  (default — Fireworks AI serverless)
  *   anthropic  (legacy Anthropic Messages API)
  *
+ * When a call carries a response schema, Fireworks enforces it during generation (JSON Schema
+ * mode), and Stoat still validates the answer afterwards. A schema the model cannot satisfy is
+ * caught by that validation, never trusted.
+ *
  * Record/replay mode is provider-agnostic: request hash is keyed to prompt + schema + model,
  * so a recorded Fireworks response replays regardless of which provider is active.
  */
@@ -18,14 +22,25 @@
 import { DbClient } from "../../db/connection.js";
 import { sha256 } from "../../common/crypto.js";
 import { StoatError } from "../../common/errors.js";
+import type { ZodTypeAny } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 export type LlmMode = "live" | "record" | "replay";
 export type LlmProvider = "fireworks" | "anthropic";
+
+/**
+ * How a live model call is made. Production uses the provider's real API (Fireworks or Anthropic).
+ * Tests may inject their own transport to exercise Stoat's handling of model output; such a
+ * transport is a TEST DOUBLE and is never configured by the application.
+ */
+export type LlmTransport = (req: { options: LlmRequestOptions; model: string }) => Promise<{ data: any; inputTokens: number; outputTokens: number }>;
 
 export interface LlmRequestOptions {
   prompt: string;
   systemPrompt?: string;
   schemaName: string;
+  /** The answer's schema. Sent to the provider for constrained decoding; the caller still validates. */
+  responseSchema?: ZodTypeAny;
   model?: string;
   tenantId?: string;
   agentRunId?: string;
@@ -46,10 +61,16 @@ export interface LlmResponse<T = any> {
 }
 
 // ── Fireworks serverless pricing (approximate, per 1M tokens, Nov 2024) ──────
-// Using Llama 3.3 70B Instruct as the default agent model.
+// Default agent model: gpt-oss-120b (override with LLM_MODEL_AGENT). Prices are estimates.
 // https://fireworks.ai/pricing
 const FIREWORKS_PRICE_PER_1M_INPUT = 0.9; // USD
 const FIREWORKS_PRICE_PER_1M_OUTPUT = 0.9; // USD
+
+/** zod schema to the JSON Schema the provider enforces (inline, no $ref). */
+function toJsonSchema(schema: ZodTypeAny): Record<string, unknown> {
+  const { $schema: _ignored, ...rest } = zodToJsonSchema(schema, { $refStrategy: "none" }) as Record<string, unknown>;
+  return rest;
+}
 
 function estimateCostUsd(inputTokens: number, outputTokens: number): number {
   return (
@@ -62,11 +83,13 @@ export class LlmAdapter {
   private mode: LlmMode;
   private provider: LlmProvider;
   private defaultModel: string;
-
+  private transport?: LlmTransport;
   constructor(
     private db: DbClient,
     mode?: LlmMode,
+    opts?: { transport?: LlmTransport },
   ) {
+    this.transport = opts?.transport;
     this.mode =
       mode ?? (process.env.LLM_MODE as LlmMode | undefined) ?? "replay";
 
@@ -81,7 +104,7 @@ export class LlmAdapter {
       // Fireworks serverless model IDs use: accounts/fireworks/models/<name>
       this.defaultModel =
         process.env.LLM_MODEL_AGENT ??
-        "accounts/fireworks/models/llama-v3p3-70b-instruct";
+        "accounts/fireworks/models/gpt-oss-120b";
     }
   }
 
@@ -95,15 +118,58 @@ export class LlmAdapter {
     this.mode = mode;
   }
 
+  /** The model every agent run uses unless it names another (LLM_MODEL_AGENT, per provider). */
+  getDefaultModel(): string {
+    return this.defaultModel;
+  }
+
   computeHash(options: LlmRequestOptions): string {
     return sha256({
       prompt: options.prompt.trim(),
       systemPrompt: options.systemPrompt?.trim() ?? "",
       schemaName: options.schemaName,
+      ...(options.responseSchema ? { responseSchema: toJsonSchema(options.responseSchema) } : {}),
       model: options.model ?? this.defaultModel,
     });
   }
 
+  /**
+   * A model call whose answer must pass `validate`. If the answer is malformed (bad JSON, wrong shape,
+   * or a semantic rule such as "cover every file"), the model is told exactly what was wrong and asked
+   * once more. Every attempt is a real call and is returned for the trace. Nothing is invented: if the
+   * last attempt is still invalid, `value` is null and the caller fails closed.
+   */
+  async executeValidated<T>(
+    options: LlmRequestOptions,
+    validate: (data: unknown) => { ok: true; value: T } | { ok: false; error: string },
+    maxAttempts = 2,
+  ): Promise<{ value: T | null; response: LlmResponse; responses: LlmResponse[]; error: string | null }> {
+    const responses: LlmResponse[] = [];
+    let prompt = options.prompt;
+    let lastError = 'no answer';
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let res: LlmResponse;
+      try {
+        res = await this.execute({ ...options, prompt });
+      } catch (err) {
+        // Unparseable output is retryable; configuration and provider errors are not.
+        if (err instanceof StoatError && err.code === "AGENT_OUTPUT_INVALID" && attempt < maxAttempts) {
+          lastError = err.message.slice(0, 300);
+          prompt = `${options.prompt}\n\nYOUR PREVIOUS ANSWER WAS REJECTED: ${lastError}\nAnswer again with JSON only, exactly in the requested shape.`;
+          continue;
+        }
+        throw err;
+      }
+      responses.push(res);
+      const v = validate(res.data);
+      if (v.ok) return { value: v.value, response: res, responses, error: null };
+      lastError = v.error.slice(0, 500);
+      prompt = `${options.prompt}\n\nYOUR PREVIOUS ANSWER WAS REJECTED: ${lastError}\nAnswer again with JSON only, exactly in the requested shape.`;
+    }
+    const last = responses[responses.length - 1];
+    if (!last) throw new StoatError("AGENT_OUTPUT_INVALID", `The model gave no usable answer: ${lastError}`, 422);
+    return { value: null, response: last, responses, error: lastError };
+  }
   async execute<T = any>(options: LlmRequestOptions): Promise<LlmResponse<T>> {
     const model = options.model ?? this.defaultModel;
     const requestHash = this.computeHash(options);
@@ -155,7 +221,9 @@ export class LlmAdapter {
     let inputTokens = 0;
     let outputTokens = 0;
 
-    if (this.provider === "fireworks") {
+    if (this.transport) {
+      ({ data: generatedData, inputTokens, outputTokens } = await this.transport({ options, model }));
+    } else if (this.provider === "fireworks") {
       ({
         data: generatedData,
         inputTokens,
@@ -209,15 +277,13 @@ export class LlmAdapter {
     options: LlmRequestOptions,
     model: string,
   ): Promise<{ data: T; inputTokens: number; outputTokens: number }> {
-    const apiKey = process.env.FIREWORKS_API_KEY;
-
+    const apiKey = process.env.FIREWORKS_API_KEY ?? process.env.LLM_API_KEY;
     if (!apiKey) {
-      // No credentials — fall back to deterministic response (offline / CI)
-      return {
-        data: this.generateDeterministicFallback(options) as T,
-        inputTokens: 0,
-        outputTokens: 0,
-      };
+      throw new StoatError(
+        "LLM_NOT_CONFIGURED",
+        "No model API key is configured (set FIREWORKS_API_KEY or LLM_API_KEY). Stoat never substitutes canned output for a live model call.",
+        503,
+      );
     }
 
     const systemPrompt =
@@ -226,9 +292,12 @@ export class LlmAdapter {
 
     const body = {
       model,
-      max_tokens: 1024,
+      max_tokens: 2048,
       temperature: 0.1, // low temperature → deterministic structured output
-      response_format: { type: "json_object" }, // JSON mode: guaranteed valid JSON
+      // JSON Schema mode constrains generation to the answer's shape; plain JSON mode otherwise.
+      response_format: options.responseSchema
+        ? { type: "json_schema", json_schema: { name: options.schemaName, schema: toJsonSchema(options.responseSchema) } }
+        : { type: "json_object" },
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: options.prompt },
@@ -304,13 +373,12 @@ export class LlmAdapter {
     model: string,
   ): Promise<{ data: T; inputTokens: number; outputTokens: number }> {
     const apiKey = process.env.LLM_API_KEY ?? process.env.ANTHROPIC_API_KEY;
-
     if (!apiKey) {
-      return {
-        data: this.generateDeterministicFallback(options) as T,
-        inputTokens: 0,
-        outputTokens: 0,
-      };
+      throw new StoatError(
+        "LLM_NOT_CONFIGURED",
+        "No model API key is configured (set FIREWORKS_API_KEY or LLM_API_KEY). Stoat never substitutes canned output for a live model call.",
+        503,
+      );
     }
 
     let response: Response;
@@ -378,68 +446,4 @@ export class LlmAdapter {
       outputTokens: resJson.usage?.output_tokens ?? 250,
     };
   }
-
-  // ── Deterministic fallback — no API key, used in offline / CI without replay
-  private generateDeterministicFallback(options: LlmRequestOptions): unknown {
-    if (options.schemaName === "code_review_findings") {
-      if (
-        options.prompt.includes("REVISE") ||
-        options.prompt.includes("REVISED")
-      ) {
-        return {
-          findings: [
-            {
-              file: "src/auth.ts",
-              line_start: 4,
-              line_end: 4,
-              snippet:
-                'const JWT_SECRET = "sk_live_insecure_hardcoded_secret_token_12345";',
-              rule_id: "SEC-002",
-              severity: "critical",
-              title: "Hardcoded Secret",
-              description: "Hardcoded secret key in repository file.",
-            },
-            {
-              file: "src/auth.ts",
-              line_start: 15,
-              line_end: 15,
-              snippet:
-                "const query = `SELECT * FROM users WHERE email = '${email}' AND is_active = true`;",
-              rule_id: "SEC-001",
-              severity: "high",
-              title: "SQL Injection",
-              description: "Unsafe SQL query string interpolation.",
-            },
-          ],
-        };
-      }
-      // Initial review — includes an ungrounded finding to exercise Beat 2A rejection
-      return {
-        findings: [
-          {
-            file: "src/auth.ts",
-            line_start: 4,
-            line_end: 4,
-            snippet:
-              'const JWT_SECRET = "sk_live_insecure_hardcoded_secret_token_12345";',
-            rule_id: "SEC-002",
-            severity: "critical",
-            title: "Hardcoded Secret",
-          },
-          {
-            // Ungrounded — file not in manifest; grounding verifier will reject
-            file: "src/crypto_vault.ts",
-            line_start: 10,
-            line_end: 12,
-            snippet: 'const cipher = crypto.createCipher("des", key);',
-            rule_id: "SEC-003",
-            severity: "high",
-            title: "Deprecated Cipher",
-          },
-        ],
-      };
-    }
-    return { result: "ok" };
-  }
 }
-

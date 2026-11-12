@@ -4,6 +4,10 @@ import { getDb, resetDb, closeDb } from '../../src/db/connection.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { seedDatabase, SEED_IDS } from '../../src/db/seed.js';
 import { dispatch } from '../test-utils.js';
+import 'dotenv/config';
+import { PayPalService } from '../../src/modules/paypal/paypal.service.js';
+import { stubPayPal } from '../funding-helpers.js';
+import { EventsService } from '../../src/modules/events/events.service.js';
 
 describe('Slice 5: Settlement Batches, Human Approval & PayPal Sandbox (P0-15, P0-16, P0-17, P0-18, P0-19, P0-20)', () => {
   let app: any;
@@ -131,7 +135,6 @@ describe('Slice 5: Settlement Batches, Human Approval & PayPal Sandbox (P0-15, P
     expect(proposeRes.body.total_amount).toBe('0.240000'); // Exact decimal sum
     expect(proposeRes.body.status).toBe('approval_required');
 
-    const batchId = proposeRes.body.id;
 
     // Verify obligations status updated to reserved_for_settlement
     const obListRes = await dispatch(app, {
@@ -202,300 +205,120 @@ describe('Slice 5: Settlement Batches, Human Approval & PayPal Sandbox (P0-15, P
     expect(humanApproveRes.body.approved_at).toBeDefined();
   });
 
-  it('P0-17: PayPal create order generates real/simulated Sandbox order for approved batch', async () => {
+  // ── Real PayPal Sandbox (skipped when no Sandbox credentials are configured) ──
+  const paypalReady = !!(process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET);
+  const USER = { Authorization: `Bearer user:${SEED_IDS.userId}` };
+
+  async function approvedBatch(amount = '0.120000') {
+    const item = await createVerifiedDeliveryAndObligation('50.000000', amount);
+    const propose = await dispatch(app, { method: 'POST', url: '/settlement/batches', headers: USER, body: { obligation_ids: [item.obligation.id] } });
+    const batchId = propose.body.id;
+    await dispatch(app, { method: 'POST', url: `/settlement/batches/${batchId}/approve`, headers: USER });
+    return { batchId, item };
+  }
+
+  it('P0-17: create-order is refused before approval, and honest when PayPal is not configured', async () => {
     const item = await createVerifiedDeliveryAndObligation('50.000000', '0.120000');
-
-    const proposeRes = await dispatch(app, {
-      method: 'POST',
-      url: '/settlement/batches',
-      headers: { Authorization: `Bearer agent:${SEED_IDS.treasuryAgentId}` },
-      body: { obligation_ids: [item.obligation.id] },
-    });
-    const batchId = proposeRes.body.id;
-
-    // Attempting to create PayPal order BEFORE approval must fail
-    const prematureCreateRes = await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/paypal/create-order`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-    expect(prematureCreateRes.status).toBe(422); // Invalid transition
-
-    // Approve the batch
-    await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/approve`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-
-    // Create PayPal order
-    const createOrderRes = await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/paypal/create-order`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-
-    expect(createOrderRes.status).toBe(201);
-    expect(createOrderRes.body.order_id).toBeDefined();
-    expect(createOrderRes.body.order_id).toMatch(/^PAYPAL-ORD-/);
-    expect(createOrderRes.body.approve_url).toContain('sandbox.paypal.com');
-    expect(createOrderRes.body.status).toBe('order_created');
-
-    // Batch status should be payment_pending
-    const batchDetails = await dispatch(app, {
-      method: 'GET',
-      url: `/settlement/batches/${batchId}`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-    expect(batchDetails.body.status).toBe('payment_pending');
+    const propose = await dispatch(app, { method: 'POST', url: '/settlement/batches', headers: USER, body: { obligation_ids: [item.obligation.id] } });
+    const early = await dispatch(app, { method: 'POST', url: `/settlement/batches/${propose.body.id}/paypal/create-order`, headers: USER });
+    expect(early.status).toBe(422);
   });
 
-  it('P0-18: PayPal server-side capture operates idempotently after buyer approval', async () => {
-    const item = await createVerifiedDeliveryAndObligation('50.000000', '0.120000');
-
-    const proposeRes = await dispatch(app, {
-      method: 'POST',
-      url: '/settlement/batches',
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-      body: { obligation_ids: [item.obligation.id] },
-    });
-    const batchId = proposeRes.body.id;
-
-    await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/approve`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-
-    const createOrderRes = await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/paypal/create-order`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-    const orderId = createOrderRes.body.order_id;
-
-    // Capture order server-side
-    const captureRes = await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/paypal/capture`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-      body: { order_id: orderId },
-    });
-
-    expect(captureRes.status).toBe(200);
-    expect(captureRes.body.status).toBe('captured');
-    expect(captureRes.body.capture_id).toMatch(/^PAYPAL-CAP-/);
-    expect(captureRes.body.amount).toBe('0.120000');
-
-    // Idempotency: Repeating capture returns same capture without re-processing
-    const repeatCaptureRes = await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/paypal/capture`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-      body: { order_id: orderId },
-    });
-
-    expect(repeatCaptureRes.status).toBe(200);
-    expect(repeatCaptureRes.body.capture_id).toBe(captureRes.body.capture_id);
+  it.skipIf(!paypalReady)('P0-17 (real PayPal Sandbox): create-order returns an order issued by PayPal', async () => {
+    const { batchId } = await approvedBatch();
+    const res = await dispatch(app, { method: 'POST', url: `/settlement/batches/${batchId}/paypal/create-order`, headers: USER });
+    expect(res.status).toBe(201);
+    expect(res.body.order_id).not.toMatch(/^PAYPAL-ORD-/);
+    expect(new URL(res.body.approve_url).host.endsWith('paypal.com')).toBe(true);
+    const batch = await dispatch(app, { method: 'GET', url: `/settlement/batches/${batchId}`, headers: USER });
+    expect(batch.body.status).toBe('payment_pending');
+    const stored = await dispatch(app, { method: 'GET', url: `/v1/settlement/batches/${batchId}/payment`, headers: USER });
+    expect(stored.body.payment.order_id).toBe(res.body.order_id);
   });
 
-  it('P0-19: Webhooks verify signature and idempotently deduplicate deliveries', async () => {
-    const eventId = `WH-EVT-${Date.now()}`;
-    const webhookPayload = {
-      id: eventId,
-      event_type: 'CHECKOUT.ORDER.APPROVED',
-      create_time: new Date().toISOString(),
-      resource: {
-        id: 'PAYPAL-ORD-TEST-123',
-        status: 'APPROVED',
-      },
-    };
-
-    // 1. Invalid signature is rejected
-    const invalidSigRes = await dispatch(app, {
-      method: 'POST',
-      url: '/webhooks/paypal',
-      headers: {
-        'paypal-transmission-sig': 'invalid-signature',
-        'paypal-transmission-id': 'trans-invalid',
-      },
-      body: webhookPayload,
-    });
-    expect(invalidSigRes.status).toBe(400);
-    expect(invalidSigRes.body.error.code).toBe('WEBHOOK_SIGNATURE_INVALID');
-
-    // 2. Valid signature is processed
-    const validRes = await dispatch(app, {
-      method: 'POST',
-      url: '/webhooks/paypal',
-      headers: {
-        'paypal-transmission-sig': 'valid-mock-signature',
-        'paypal-transmission-id': 'trans-valid-1',
-      },
-      body: webhookPayload,
-    });
-    expect(validRes.status).toBe(200);
-    expect(validRes.body.duplicate).toBe(false);
-
-    // 3. Duplicate delivery is handled idempotently
-    const duplicateRes = await dispatch(app, {
-      method: 'POST',
-      url: '/webhooks/paypal',
-      headers: {
-        'paypal-transmission-sig': 'valid-mock-signature',
-        'paypal-transmission-id': 'trans-valid-2',
-      },
-      body: webhookPayload,
-    });
-    expect(duplicateRes.status).toBe(200);
-    expect(duplicateRes.body.duplicate).toBe(true);
+  it.skipIf(!paypalReady)('P0-18 (real PayPal Sandbox): PayPal refuses capture until the buyer approves; nothing settles', async () => {
+    const { batchId, item } = await approvedBatch();
+    const order = await dispatch(app, { method: 'POST', url: `/settlement/batches/${batchId}/paypal/create-order`, headers: USER });
+    const cap = await dispatch(app, { method: 'POST', url: `/settlement/batches/${batchId}/paypal/capture`, headers: USER, body: { order_id: order.body.order_id } });
+    expect(cap.status).toBe(409);
+    expect(cap.body.error.code).toBe('PAYPAL_ORDER_NOT_APPROVED');
+    const batch = await dispatch(app, { method: 'GET', url: `/settlement/batches/${batchId}`, headers: USER });
+    expect(batch.body.status).toBe('payment_pending');
+    const obs = await dispatch(app, { method: 'GET', url: '/obligations', headers: USER });
+    expect(obs.body.obligations.find((o: any) => o.id === item.obligation.id).status).not.toBe('settled');
   });
 
-  it('P0-20: Reconciliation engine matches exact amounts/currencies and rejects mismatches without false success', async () => {
-    const item = await createVerifiedDeliveryAndObligation('50.000000', '0.120000');
+  it.skipIf(paypalReady)('P0-18: without credentials Stoat refuses with PAYPAL_NOT_CONFIGURED and invents nothing', async () => {
+    const { batchId } = await approvedBatch();
+    const res = await dispatch(app, { method: 'POST', url: `/settlement/batches/${batchId}/paypal/create-order`, headers: USER });
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('PAYPAL_NOT_CONFIGURED');
+    const batch = await dispatch(app, { method: 'GET', url: `/settlement/batches/${batchId}`, headers: USER });
+    expect(batch.body.status).toBe('approved');
+  });
 
-    const proposeRes = await dispatch(app, {
-      method: 'POST',
-      url: '/settlement/batches',
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-      body: { obligation_ids: [item.obligation.id] },
-    });
-    const batchId = proposeRes.body.id;
-
-    await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/approve`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-
-    const createOrderRes = await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/paypal/create-order`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-    const orderId = createOrderRes.body.order_id;
-    const txId = createOrderRes.body.payment_transaction_id;
-
-    // Capture the payment
-    const captureRes = await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${batchId}/paypal/capture`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-      body: { order_id: orderId },
-    });
-
-    // Send Webhook with matching amount
-    const webhookRes = await dispatch(app, {
+  it('P0-19: a webhook with a forged or missing signature is rejected and recorded nowhere', async () => {
+    const res = await dispatch(app, {
       method: 'POST',
       url: '/webhooks/paypal',
-      headers: {
-        'paypal-transmission-sig': 'valid-sig',
-        'paypal-transmission-id': `trans-${Date.now()}`,
-      },
-      body: {
-        id: `WH-MATCH-${Date.now()}`,
-        event_type: 'PAYMENT.CAPTURE.COMPLETED',
-        resource: {
-          id: captureRes.body.capture_id,
-          custom_id: batchId,
-          amount: {
-            value: '0.120000',
-            currency_code: 'USD',
-          },
-        },
-      },
+      headers: { 'paypal-transmission-sig': 'forged', 'paypal-transmission-id': 'trans-forged' },
+      body: { id: `WH-FORGED-${Date.now()}`, event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: 'CAP-X', custom_id: 'x' } },
     });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('WEBHOOK_SIGNATURE_INVALID');
+    const rows = await getDb().query(`SELECT count(*)::int AS n FROM webhook_events`);
+    expect(rows.rows[0].n).toBe(0);
+  });
 
-    expect(webhookRes.status).toBe(200);
+  // Stoat's own reconcile/dedupe logic, with the shared PayPal test double (tests/funding-helpers.ts).
 
-    // Check reconciliation records
-    const recRes = await dispatch(app, {
-      method: 'GET',
-      url: '/reconciliation',
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
+  it('P0-20: a capture that matches the batch reconciles, settles obligations, and a repeat webhook changes nothing', async () => {
+    const { batchId, item } = await approvedBatch();
+    const db = getDb();
+    const svc = new PayPalService(db, new EventsService(db), stubPayPal({ capturedAmount: '0.12' }));
+    const order = await svc.createOrderForBatch({ tenantId: SEED_IDS.tenantId, batchId, userId: SEED_IDS.userId });
+    const cap = await svc.captureOrder({ tenantId: SEED_IDS.tenantId, orderId: order.order_id, userId: SEED_IDS.userId });
+    expect(cap.status).toBe('reconciled');
+    expect(cap.amount).toBe('0.120000');
+    const again = await svc.captureOrder({ tenantId: SEED_IDS.tenantId, orderId: order.order_id, userId: SEED_IDS.userId });
+    expect(again.capture_id).toBe(cap.capture_id);
 
-    expect(recRes.status).toBe(200);
-    const matchedRecord = recRes.body.records.find((r: any) => r.batch_id === batchId);
-    expect(matchedRecord).toBeDefined();
-    expect(matchedRecord.verdict).toBe('matched');
-    expect(matchedRecord.expected_amount).toBe('0.120000');
-    expect(matchedRecord.actual_amount).toBe('0.120000');
-    expect(matchedRecord.details.disbursement_note).toContain('PayPal Sandbox capture is buyer-to-merchant');
+    const hook = { id: `WH-${Date.now()}`, event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: { id: cap.capture_id, custom_id: batchId, amount: { value: '0.12', currency_code: 'USD' } } };
+    const first = await svc.handleWebhook({ headers: {}, rawBody: JSON.stringify(hook), payload: hook });
+    expect(first.valid).toBe(true);
+    expect(first.duplicate).toBe(false);
+    const dup = await svc.handleWebhook({ headers: {}, rawBody: JSON.stringify(hook), payload: hook });
+    expect(dup.duplicate).toBe(true);
 
-    // Verify batch is confirmed and obligations are settled
-    const updatedBatch = await dispatch(app, {
-      method: 'GET',
-      url: `/settlement/batches/${batchId}`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-    expect(updatedBatch.body.status).toBe('confirmed');
+    const recs = await svc.listReconciliationRecords(SEED_IDS.tenantId);
+    expect(recs.filter((r: any) => r.batch_id === batchId && r.verdict === 'matched')).toHaveLength(1);
+    const batch = await dispatch(app, { method: 'GET', url: `/settlement/batches/${batchId}`, headers: USER });
+    expect(batch.body.status).toBe('confirmed');
+    const obs = await dispatch(app, { method: 'GET', url: '/obligations', headers: USER });
+    expect(obs.body.obligations.find((o: any) => o.id === item.obligation.id).status).toBe('settled');
+  });
 
-    const updatedObligation = await dispatch(app, {
-      method: 'GET',
-      url: '/obligations',
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-    const settledOb = updatedObligation.body.obligations.find((o: any) => o.id === item.obligation.id);
-    expect(settledOb.status).toBe('settled');
+  it('P0-20: a capture for the wrong amount is flagged, never settled', async () => {
+    const { batchId, item } = await approvedBatch();
+    const db = getDb();
+    const svc = new PayPalService(db, new EventsService(db), stubPayPal({ capturedAmount: '0.05' }));
+    const order = await svc.createOrderForBatch({ tenantId: SEED_IDS.tenantId, batchId, userId: SEED_IDS.userId });
+    const cap = await svc.captureOrder({ tenantId: SEED_IDS.tenantId, orderId: order.order_id, userId: SEED_IDS.userId });
+    expect(cap.status).toBe('reconciliation_required');
+    const recs = await svc.listReconciliationRecords(SEED_IDS.tenantId);
+    const rec = recs.find((r: any) => r.batch_id === batchId);
+    expect(rec.verdict).toBe('mismatch');
+    expect(rec.details.issues[0]).toContain('Amount mismatch');
+    const batch = await dispatch(app, { method: 'GET', url: `/settlement/batches/${batchId}`, headers: USER });
+    expect(batch.body.status).toBe('reconciliation_required');
+    const obs = await dispatch(app, { method: 'GET', url: '/obligations', headers: USER });
+    expect(obs.body.obligations.find((o: any) => o.id === item.obligation.id).status).not.toBe('settled');
+  });
 
-    // Test Amount Mismatch Handling (P0-20 mismatch)
-    const mismatchItem = await createVerifiedDeliveryAndObligation('50.000000', '0.120000');
-    const mismatchBatch = await dispatch(app, {
-      method: 'POST',
-      url: '/settlement/batches',
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-      body: { obligation_ids: [mismatchItem.obligation.id] },
-    });
-    await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${mismatchBatch.body.id}/approve`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-    const mismatchOrder = await dispatch(app, {
-      method: 'POST',
-      url: `/settlement/batches/${mismatchBatch.body.id}/paypal/create-order`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-
-    // Webhook delivers tampered/wrong amount ($0.05 instead of $0.12)
-    await dispatch(app, {
-      method: 'POST',
-      url: '/webhooks/paypal',
-      headers: {
-        'paypal-transmission-sig': 'valid-sig',
-        'paypal-transmission-id': `trans-mismatch-${Date.now()}`,
-      },
-      body: {
-        id: `WH-MISMATCH-${Date.now()}`,
-        event_type: 'PAYMENT.CAPTURE.COMPLETED',
-        resource: {
-          id: 'CAP-MISMATCH-123',
-          custom_id: mismatchBatch.body.id,
-          amount: {
-            value: '0.050000', // Mismatch!
-            currency_code: 'USD',
-          },
-        },
-      },
-    });
-
-    // Verify reconciliation record is mismatch and batch is reconciliation_required
-    const recMismatchRes = await dispatch(app, {
-      method: 'GET',
-      url: '/reconciliation',
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-    const mismatchRecord = recMismatchRes.body.records.find((r: any) => r.batch_id === mismatchBatch.body.id);
-    expect(mismatchRecord).toBeDefined();
-    expect(mismatchRecord.verdict).toBe('mismatch');
-    expect(mismatchRecord.details.issues[0]).toContain('Amount mismatch');
-
-    const mismatchBatchRes = await dispatch(app, {
-      method: 'GET',
-      url: `/settlement/batches/${mismatchBatch.body.id}`,
-      headers: { Authorization: `Bearer user:${SEED_IDS.userId}` },
-    });
-    expect(mismatchBatchRes.body.status).toBe('reconciliation_required');
+  it('P0-19: the service treats a webhook PayPal did not verify as invalid', async () => {
+    const db = getDb();
+    const svc = new PayPalService(db, new EventsService(db), stubPayPal({ capturedAmount: '0.12', webhookValid: false }));
+    const res = await svc.handleWebhook({ headers: {}, rawBody: '{}', payload: { id: 'WH-NOPE', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: {} } });
+    expect(res.valid).toBe(false);
   });
 });

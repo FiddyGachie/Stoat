@@ -3,12 +3,11 @@ import { createApp } from '../../src/api/app.js';
 import { getDb, resetDb, closeDb } from '../../src/db/connection.js';
 import { runMigrations } from '../../src/db/migrate.js';
 import { seedDatabase, SEED_IDS } from '../../src/db/seed.js';
-import { McpServer, FORBIDDEN_MCP_TOOLS } from '../../src/mcp/server.js';
+import { FORBIDDEN_MCP_TOOLS } from '../../src/mcp/server.js';
 import { dispatch } from '../test-utils.js';
 
 describe('Slice 6: Model Context Protocol (MCP) Server (P0-21 & P0-22)', () => {
   let app: any;
-  let mcpServer: McpServer;
 
   beforeAll(async () => {
     await resetDb();
@@ -16,7 +15,6 @@ describe('Slice 6: Model Context Protocol (MCP) Server (P0-21 & P0-22)', () => {
     await runMigrations(db);
     await seedDatabase(db);
     app = createApp();
-    mcpServer = new McpServer(db);
   });
 
   beforeEach(async () => {

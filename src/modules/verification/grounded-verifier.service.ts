@@ -31,6 +31,11 @@ export interface VerificationOutcome {
 export class GroundedVerifierService {
   private fixtureRoot: string;
 
+  /** Where the controlled repository fixture lives (the verifier and the reviewer read the same files). */
+  getFixtureRoot(): string {
+    return this.fixtureRoot;
+  }
+
   constructor(private db: DbClient, fixtureDir?: string) {
     if (fixtureDir) {
       this.fixtureRoot = fixtureDir;

@@ -10,7 +10,7 @@ export interface TestResponse {
 export function dispatch(
   app: Express,
   options: {
-    method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
     url: string;
     headers?: Record<string, string>;
     body?: any;
@@ -36,7 +36,7 @@ export function dispatch(
     req.socket = { remoteAddress: '127.0.0.1' };
     req.query = {};
 
-    const [path, queryString] = options.url.split('?');
+    const queryString = options.url.split('?')[1];
     if (queryString) {
       req.query = Object.fromEntries(new URLSearchParams(queryString));
     }

@@ -1,0 +1,10 @@
+{
+  "buildCommand": "pnpm console:build",
+  "outputDirectory": "dist/console",
+  "rewrites": [
+    {
+      "source": "/v1/:path*",
+      "destination": "/api/v1/:path*"
+    }
+  ]
+}

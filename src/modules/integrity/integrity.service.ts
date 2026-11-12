@@ -22,6 +22,10 @@ export interface IntegrityReport {
     batch_sum_mismatches: number;
     unreconciled_captures: number;
     unauthorized_agreements: number;
+    paid_without_payout: number;
+    duplicate_successful_payouts: number;
+    payout_exceeds_obligation: number;
+    non_paypal_payments: number;
   };
   details: Record<string, any>;
 }
@@ -152,7 +156,40 @@ export class IntegrityService {
     );
     const unauthorizedAgreements = parseInt(unauthAgreementsRes.rows[0]?.count || '0', 10);
 
+    // 9. v2.1 payout invariants. An obligation is 'paid' only when PayPal confirmed a payout item for it.
+    const paidNoPayoutRes = await this.db.query(
+      `SELECT COUNT(*)::int AS count FROM obligations o
+       WHERE o.tenant_id = $1 AND o.status = 'paid'
+         AND NOT EXISTS (SELECT 1 FROM payouts p WHERE p.tenant_id = o.tenant_id AND p.status = 'paid' AND p.obligation_ids @> to_jsonb(o.id::text))`,
+      [tenantId]
+    );
+    const paidWithoutPayout = Number(paidNoPayoutRes.rows[0]?.count ?? 0);
+    const dupPaidRes = await this.db.query(
+      `SELECT COUNT(*)::int AS count FROM (
+         SELECT ob FROM payouts p, jsonb_array_elements_text(p.obligation_ids) AS ob
+         WHERE p.tenant_id = $1 AND p.status = 'paid' GROUP BY ob HAVING COUNT(*) > 1) d`,
+      [tenantId]
+    );
+    const duplicateSuccessfulPayouts = Number(dupPaidRes.rows[0]?.count ?? 0);
+    const overRes = await this.db.query(
+      `SELECT COUNT(*)::int AS count FROM payouts p
+       WHERE p.tenant_id = $1 AND p.amount > COALESCE((
+         SELECT SUM(o.amount) FROM obligations o WHERE o.id::text IN (SELECT jsonb_array_elements_text(p.obligation_ids))), 0)`,
+      [tenantId]
+    );
+    const payoutExceedsObligation = Number(overRes.rows[0]?.count ?? 0);
+    const nonPaypalRes = await this.db.query(
+      `SELECT (SELECT COUNT(*) FROM payment_transactions WHERE tenant_id = $1 AND lower(provider) <> 'paypal')
+            + (SELECT COUNT(*) FROM agreement_payments WHERE tenant_id = $1 AND lower(provider) <> 'paypal')
+            + (SELECT COUNT(*) FROM payouts WHERE tenant_id = $1 AND lower(provider) <> 'paypal') AS count`,
+      [tenantId]
+    );
+    const nonPaypalPayments = Number(nonPaypalRes.rows[0]?.count ?? 0);
     const isHealthy =
+      paidWithoutPayout === 0 &&
+      duplicateSuccessfulPayouts === 0 &&
+      payoutExceedsObligation === 0 &&
+      nonPaypalPayments === 0 &&
       isJournalBalanced &&
       hashChainGaps === 0 &&
       duplicateObligations === 0 &&
@@ -174,6 +211,10 @@ export class IntegrityService {
         batch_sum_mismatches: batchSumMismatches,
         unreconciled_captures: unreconciledCaptures,
         unauthorized_agreements: unauthorizedAgreements,
+        paid_without_payout: paidWithoutPayout,
+        duplicate_successful_payouts: duplicateSuccessfulPayouts,
+        payout_exceeds_obligation: payoutExceedsObligation,
+        non_paypal_payments: nonPaypalPayments,
       },
       details: {
         broken_chains: brokenChains,

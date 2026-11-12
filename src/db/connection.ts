@@ -1,5 +1,26 @@
-import pg from "pg";
+/**
+ * Database connection — Drizzle ORM over `postgres` (Supabase-compatible).
+ *
+ * Connection is determined at startup from DATABASE_URL in .env:
+ *
+ *   Supabase (production / staging):
+ *     DATABASE_URL=postgresql://postgres.[ref]:[pass]@aws-0-[region].pooler.supabase.com:6543/postgres
+ *
+ *   Local Postgres:
+ *     DATABASE_URL=postgresql://user:password@localhost:5432/dbname
+ *
+ *   Embedded PGlite (no DATABASE_URL or memory:// — local dev / tests):
+ *     DATABASE_URL=    (blank)
+ *
+ * The exported `DbClient` interface is intentionally identical to the previous
+ * pg.Pool wrapper, so every service file continues to call `.query(sql, params)`
+ * without any changes. Drizzle's SQL-tagged template and query builder are
+ * available via `getDrizzle()` when new code wants typed queries.
+ */
+import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import { PGlite } from "@electric-sql/pglite";
+import * as schema from "./schema.js";
 
 export interface QueryResult<T = any> {
   rows: T[];
@@ -11,40 +32,78 @@ export interface DbClient {
   exec(sql: string): Promise<void>;
 }
 
-let pgPool: pg.Pool | null = null;
+// ── Module-level singletons ────────────────────────────────────────────────────
+let pgClient: postgres.Sql | null = null;
+let drizzleDb: PostgresJsDatabase<typeof schema> | null = null;
 let pgliteInstance: PGlite | null = null;
-let isPgliteMode = false;
 
-export function isEmbeddedPostgres(): boolean {
-  return isPgliteMode;
-}
+// ── Supabase / Postgres connection options ─────────────────────────────────────
 
-/**
- * Build pg.Pool config from a DATABASE_URL, adding SSL settings appropriate
- * for Render Postgres (internal URL uses self-signed cert; sslmode=require).
- */
-function buildPgPoolConfig(url: string): pg.PoolConfig {
-  const isRender = process.env.RENDER === "true";
-  const isRenderInternal = url.includes(".render.com") || url.includes("dpg-");
+function buildPostgresOptions(url: string): postgres.Options<any> {
+  const parsed = (() => {
+    try {
+      return new URL(url);
+    } catch {
+      return null;
+    }
+  })();
 
-  const base: pg.PoolConfig = {
-    connectionString: url,
-    // Free-tier Render Postgres allows up to 25 connections; cap below that.
-    // Starter/Standard plans have higher limits — tune via PGPOOL_MAX env var.
-    max: parseInt(process.env.PGPOOL_MAX ?? "10", 10),
-    // Idle connections are released quickly to avoid hitting the free-tier limit.
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
+  const isSupabase = parsed
+    ? parsed.hostname.endsWith(".supabase.com") ||
+      parsed.hostname.endsWith(".supabase.co") ||
+      parsed.hostname.includes("pooler.supabase")
+    : false;
+
+  // Supabase's transaction pooler (Supavisor/PgBouncer, port 6543) hands each statement to any
+  // free backend, so prepared statements break and long-lived connections can be dropped by the
+  // pooler. postgres.js must run with prepare:false there (Supabase guidance), and connections are
+  // recycled so a silently dropped one cannot leave requests waiting forever.
+  const isTransactionPooler =
+    (parsed?.port === "6543" || url.includes(":6543/")) &&
+    (isSupabase || url.includes("pooler"));
+
+  const isRender =
+    url.includes(".render.com") ||
+    url.includes("dpg-") ||
+    process.env.RENDER === "true";
+  const isVercel = process.env.VERCEL === "1";
+
+  // Supabase pooler (port 6543) requires no SSL verify; direct (5432) uses verify-full.
+  // Render internal connections need rejectUnauthorized:false for self-signed certs.
+  const ssl: postgres.Options<any>["ssl"] = isSupabase
+    ? {
+        // Direct host (db.<ref>.supabase.co:5432) → verify. The pooler host (either port) → skip,
+        // as before for 6543; session mode (pooler :5432) uses the same certificate.
+        rejectUnauthorized: parsed?.port === "5432" && !url.includes("pooler"),
+      }
+    : isRender
+      ? { rejectUnauthorized: false }
+      : undefined;
+
+  return {
+    max: parseInt(process.env.PGPOOL_MAX ?? (isVercel ? "2" : "10"), 10),
+    idle_timeout: isTransactionPooler ? 20 : 30,
+    connect_timeout: 10,
+    // Recycle pooled connections (seconds) so a connection the pooler dropped is replaced.
+    max_lifetime: parseInt(process.env.PG_MAX_LIFETIME_S ?? (isTransactionPooler ? "300" : "1800"), 10),
+    // Transaction pooling cannot keep prepared statements; PG_PREPARE=true forces them back on.
+    prepare: process.env.PG_PREPARE ? process.env.PG_PREPARE === "true" : !isTransactionPooler,
+    ...(ssl !== undefined ? { ssl } : {}),
+    // In ESM builds `postgres` uses native BigInt; coerce to string for compatibility
+    // with existing code that treats NUMERIC columns as strings (Decimal.js).
+    types: {
+      bigint: postgres.BigInt,
+    },
+    // Forward Postgres notices to stderr so Render's log stream picks them up.
+    onnotice: (notice: postgres.Notice) => {
+      if (notice.severity !== "NOTICE") {
+        process.stderr.write(`[DB notice] ${notice.message}\n`);
+      }
+    },
   };
-
-  if (isRender || isRenderInternal) {
-    // Render Postgres internal URL uses a self-signed cert.
-    // sslmode=require ensures the connection is encrypted without verifying the cert.
-    base.ssl = { rejectUnauthorized: false };
-  }
-
-  return base;
 }
+
+// ── Initialise ────────────────────────────────────────────────────────────────
 
 export function initDb(options?: {
   databaseUrl?: string;
@@ -53,44 +112,72 @@ export function initDb(options?: {
   const url = options?.databaseUrl ?? process.env.DATABASE_URL;
 
   if (!options?.forceEmbedded && url && !url.startsWith("memory:")) {
-    isPgliteMode = false;
-    if (!pgPool) {
-      pgPool = new pg.Pool(buildPgPoolConfig(url));
-
-      // Log pool errors so they surface in Render's log stream
-      pgPool.on("error", (err) => {
-        console.error("[DB] Unexpected pool client error:", err.message);
-      });
+    if (!pgClient) {
+      pgClient = postgres(url, buildPostgresOptions(url));
+      drizzleDb = drizzle(pgClient, { schema });
+      pgClient
+        .listen?.("stoat_error", (msg) =>
+          process.stderr.write(`[DB listen] ${msg}\n`),
+        )
+        .catch(() => undefined);
     }
-    return makePoolClient();
-  } else {
-    isPgliteMode = true;
-    if (!pgliteInstance) {
-      pgliteInstance = new PGlite();
-    }
-    return makePgliteClient();
+    return makePostgresClient();
   }
+
+  // Embedded PGlite — local dev, tests, no DATABASE_URL
+  if (!pgliteInstance) {
+    pgliteInstance = new PGlite();
+  }
+  return makePgliteClient();
 }
 
-function makePoolClient(): DbClient {
+// ── Typed Drizzle instance (available after initDb with a real URL) ────────────
+/**
+ * Returns the typed Drizzle query builder. Throws if called before `initDb()` or
+ * when using the embedded PGlite (query builder is not available in that case).
+ * Use this for new typed query code; existing services can keep using `DbClient.query()`.
+ */
+export function getDrizzle(): PostgresJsDatabase<typeof schema> {
+  if (!drizzleDb) {
+    throw new Error(
+      "Drizzle instance is not initialised. Call initDb() with a DATABASE_URL first.",
+    );
+  }
+  return drizzleDb;
+}
+
+// ── Singleton accessor ─────────────────────────────────────────────────────────
+
+export function getDb(): DbClient {
+  if (pgClient) return makePostgresClient();
+  if (pgliteInstance) return makePgliteClient();
+  return initDb();
+}
+
+// ── postgres.js DbClient wrapper ──────────────────────────────────────────────
+
+function makePostgresClient(): DbClient {
   return {
     async query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>> {
-      const res = await pgPool!.query(sql, params);
-      return {
-        rows: res.rows as T[],
-        rowCount: res.rowCount ?? res.rows.length,
-      };
+      // postgres.js uses tagged templates; for parameterised queries we pass
+      // the values array as the second argument to the unsafe() helper.
+      const rows = params?.length
+        ? await pgClient!.unsafe<T[]>(sql, params as any[])
+        : await pgClient!.unsafe<T[]>(sql);
+      return { rows: rows as T[], rowCount: rows.length };
     },
     async exec(sql: string): Promise<void> {
-      await pgPool!.query(sql);
+      await pgClient!.unsafe(sql);
     },
   };
 }
 
+// ── PGlite DbClient wrapper ────────────────────────────────────────────────────
+
 function makePgliteClient(): DbClient {
   return {
     async query<T = any>(sql: string, params?: any[]): Promise<QueryResult<T>> {
-      const res = await pgliteInstance!.query(sql, params);
+      const res = await pgliteInstance!.query<T>(sql, params);
       return { rows: res.rows as T[], rowCount: res.rows.length };
     },
     async exec(sql: string): Promise<void> {
@@ -99,46 +186,37 @@ function makePgliteClient(): DbClient {
   };
 }
 
-export function getDb(): DbClient {
-  if (pgPool) return makePoolClient();
-  if (pgliteInstance) return makePgliteClient();
-  return initDb();
-}
+// ── Transactions ──────────────────────────────────────────────────────────────
 
 export async function transaction<T>(
   fn: (client: DbClient) => Promise<T>,
 ): Promise<T> {
-  const db = getDb();
-  if (pgPool) {
-    const client = await pgPool.connect();
-    try {
-      await client.query("BEGIN");
-      const wrappedClient: DbClient = {
+  if (pgClient) {
+    // postgres.js transactions: the `sql` function passed inside is scoped to
+    // the transaction connection; we wrap it in the DbClient interface.
+    return pgClient.begin(async (tx) => {
+      const txClient: DbClient = {
         async query<R = any>(
           sql: string,
           params?: any[],
         ): Promise<QueryResult<R>> {
-          const res = await client.query(sql, params);
-          return {
-            rows: res.rows as R[],
-            rowCount: res.rowCount ?? res.rows.length,
-          };
+          const rows = params?.length
+            ? await tx.unsafe<R[]>(sql, params as any[])
+            : await tx.unsafe<R[]>(sql);
+          return { rows: rows as R[], rowCount: rows.length };
         },
         async exec(sql: string): Promise<void> {
-          await client.query(sql);
+          await tx.unsafe(sql);
         },
       };
-      const result = await fn(wrappedClient);
-      await client.query("COMMIT");
-      return result;
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-    }
-  } else {
-    // PGlite — single-connection, serialised
+      return fn(txClient);
+    }) as Promise<T>;
+  }
+
+  // PGlite — one shared connection, so concurrent BEGIN/COMMIT pairs would
+  // interleave. Chain each transaction behind the previous one (promise-chain mutex).
+  const run = pgliteTail.then(async () => {
+    const db = makePgliteClient();
     await db.exec("BEGIN");
     try {
       const result = await fn(db);
@@ -148,21 +226,39 @@ export async function transaction<T>(
       await db.exec("ROLLBACK");
       throw err;
     }
-  }
+  });
+  // The tail never rejects, so one failed transaction does not block the next.
+  pgliteTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
+/** Tail of the PGlite transaction queue. */
+let pgliteTail: Promise<void> = Promise.resolve();
+
+// ── Lifecycle helpers ─────────────────────────────────────────────────────────
+
 export async function closeDb(): Promise<void> {
-  if (pgPool) {
-    await pgPool.end();
-    pgPool = null;
+  if (pgClient) {
+    await pgClient.end();
+    pgClient = null;
+    drizzleDb = null;
   }
   if (pgliteInstance) {
     await pgliteInstance.close();
     pgliteInstance = null;
+    pgliteTail = Promise.resolve();
   }
 }
 
 export async function resetDb(): Promise<void> {
   await closeDb();
   initDb({ forceEmbedded: true });
+}
+
+/** Exported for tests that need to assert the configured pool config. */
+export function getPgPoolConfig(url: string) {
+  return buildPostgresOptions(url);
 }

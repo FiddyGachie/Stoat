@@ -44,19 +44,10 @@ services:
         value: production
       - key: PORT
         value: "10000"                 # Render's default — must match what Express binds to
-      - key: APP_BASE_URL
-        fromService:
-          name: stoat-api
-          type: web
-          property: host               # https://stoat-api.onrender.com
 
       # ── Auth — set these as secrets in the Render Dashboard ──────────────
       - key: JWT_SECRET
         sync: false                    # prompted at first deploy; never stored in YAML
-      - key: JWT_ISSUER
-        value: stoat-render
-      - key: JWT_AUDIENCE
-        value: stoat-api
 
       # ── LLM Provider ────────────────────────────────────────────────────
       - key: LLM_PROVIDER
@@ -64,11 +55,9 @@ services:
       - key: FIREWORKS_API_KEY
         sync: false                    # secret — enter in Render Dashboard
       - key: LLM_MODEL_AGENT
-        value: accounts/fireworks/models/llama-v3p3-70b-instruct
-      - key: LLM_MODEL_FAST
-        value: accounts/fireworks/models/llama-v3p1-8b-instruct
+        value: accounts/fireworks/models/gpt-oss-120b
       - key: LLM_MODE
-        value: replay                  # safe default; change to live once API key is set
+        value: record                  # live model call, stored so it can be replayed in CI; replay alone fails on new prompts
 
       # ── Agent runtime limits ─────────────────────────────────────────────
       - key: AGENT_MAX_STEPS
@@ -91,14 +80,20 @@ services:
         value: https://stoat-api.onrender.com/v1/paypal/return  # update after first deploy
       - key: PAYPAL_CANCEL_URL
         value: https://stoat-api.onrender.com/v1/paypal/cancel
-      - key: PAYPAL_SIMULATED
-        value: "false"
+      - key: REQUIRE_FUNDING
+        value: "true"
+      - key: PAYMENT_PROVIDER
+        value: PAYPAL
+      - key: PAYPAL_PAYOUTS_ENABLED
+        value: "false"   # set true only after `npm run paypal:spike` passes against your PayPal app
+      - key: PAYPAL_PAYOUTS_CAPABILITY_STATUS
+        value: unknown   # set to enabled after the spike
+      - key: RECIPIENT_ENCRYPTION_KEY
+        generateValue: true
+      - key: CONSOLE_URL
+        sync: false   # public URL of the stoat-console static site; PayPal buyers are sent back here
 
       # ── Observability ────────────────────────────────────────────────────
-      - key: LOG_LEVEL
-        value: info
-      - key: DEMO_MODE
-        value: "true"
 
   # ── Background Worker ───────────────────────────────────────────────────────
   - name: stoat-worker
@@ -116,8 +111,6 @@ services:
           property: connectionString
       - key: NODE_ENV
         value: production
-      - key: LOG_LEVEL
-        value: info
 
   # ── Operator Console (Static Site) ──────────────────────────────────────────
   - name: stoat-console
@@ -130,10 +123,6 @@ services:
     envVars:
       - key: VITE_API_BASE_URL
         value: https://stoat-api.onrender.com
-      - key: VITE_LLM_MODE
-        value: replay
-      - key: VITE_PAYPAL_SIMULATED
-        value: "false"
     routes:
       - type: rewrite
         source: /*

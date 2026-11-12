@@ -1,8 +1,22 @@
-import React from 'react';
-import { AgGridReact } from 'ag-grid-react';
-import type { ColDef } from 'ag-grid-community';
-import 'ag-grid-community/styles/ag-grid.css';
-import 'ag-grid-community/styles/ag-theme-alpine.css';
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { AgGridReact } from "ag-grid-react";
+import type { ColDef, GridApi, GridReadyEvent } from "ag-grid-community";
+import {
+  ModuleRegistry,
+  AllCommunityModule,
+  ValidationModule,
+} from "ag-grid-community";
+import "ag-grid-community/styles/ag-grid.css";
+import "ag-grid-community/styles/ag-theme-quartz.css";
+import { Download, TriangleAlert, X } from "lucide-react";
+import { EmptyState, Icon, Loading } from "./ui.js";
+
+// AG Grid v36 modular build.
+// AllCommunityModule registers every community feature in one call:
+// CellStyleModule, CellRendererModule, PaginationModule, QuickFilterModule,
+// CsvExportModule, ColumnAutoSizeModule, RowStyleModule, etc.
+// ValidationModule surfaces full human-readable error messages in the browser console.
+ModuleRegistry.registerModules([AllCommunityModule, ValidationModule]);
 
 interface Props {
   title: string;
@@ -13,69 +27,147 @@ interface Props {
   onRowClick?: (row: unknown) => void;
   badge?: React.ReactNode;
   getRowId?: (params: { data: unknown }) => string;
+  quickFilter?: string;
+  onQuickFilterChange?: (text: string) => void;
+  actions?: React.ReactNode;
+  /** Hide the built-in CSV button when the caller offers a server-side export. */
+  hideCsv?: boolean;
 }
 
+/** A data table presented as a glass card, with filtering, CSV export, loading, empty and error states. */
 export const GridPanel: React.FC<Props> = ({
-  title, rows, cols, loading, error, onRowClick, badge, getRowId,
+  title,
+  rows,
+  cols,
+  loading,
+  error,
+  onRowClick,
+  badge,
+  getRowId,
+  quickFilter,
+  onQuickFilterChange,
+  actions,
+  hideCsv,
 }) => {
+  const [filterText, setFilterText] = useState(quickFilter ?? "");
+  const gridApiRef = useRef<GridApi | null>(null);
+
+  useEffect(() => {
+    if (quickFilter !== undefined) {
+      setFilterText(quickFilter);
+    }
+  }, [quickFilter]);
+
+  const handleFilterChange = (val: string) => {
+    setFilterText(val);
+    onQuickFilterChange?.(val);
+  };
+
+  const onGridReady = useCallback((params: GridReadyEvent) => {
+    gridApiRef.current = params.api;
+  }, []);
+
+  const exportCsv = useCallback(() => {
+    if (gridApiRef.current) {
+      gridApiRef.current.exportDataAsCsv({
+        fileName: `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${new Date().toISOString().slice(0, 10)}.csv`,
+      });
+    }
+  }, [title]);
+
   if (error) {
     return (
-      <div style={{ padding: 24 }} role="alert" aria-live="polite">
-        <h2 style={{ color: '#ef4444', marginBottom: 8 }}>{title}</h2>
-        <p style={{ color: '#ef4444' }}>Error: {error}</p>
-      </div>
+      <section className="card grid-card" aria-label={title}>
+        <div className="grid-card-head"><h2>{title}</h2></div>
+        <div className="notice notice-error" role="alert" style={{ margin: "var(--space-4)" }}>
+          <Icon icon={TriangleAlert} />
+          <span>Could not load {title.toLowerCase()}: {error}</span>
+        </div>
+      </section>
     );
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{
-        padding: '12px 16px',
-        borderBottom: '1px solid #2d3352',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-      }}>
-        <h2 style={{ fontSize: 15, fontWeight: 600, color: '#e2e8f0' }}>{title}</h2>
+    <section className="card grid-card" aria-label={title}>
+      <div className="grid-card-head">
+        <h2>{title}</h2>
         {badge}
-        {loading && (
-          <span
-            aria-label="Loading data"
-            style={{ color: '#64748b', fontSize: 12 }}
-          >
-            ⟳ loading…
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "var(--space-2)", flexWrap: "wrap" }}>
+          {rows.length > 0 && (
+            <div className="grid-search-wrap" style={{ position: "relative", display: "flex", alignItems: "center" }}>
+              <input
+                type="search"
+                className="grid-search-input"
+                placeholder="Filter table…"
+                aria-label={`Filter ${title}`}
+                value={filterText}
+                onChange={(e) => handleFilterChange(e.target.value)}
+              />
+              {filterText && (
+                <button
+                  type="button"
+                  className="icon-button"
+                  style={{ position: "absolute", right: "4px", minHeight: "24px", width: "24px", padding: 0 }}
+                  aria-label="Clear filter"
+                  onClick={() => handleFilterChange("")}
+                >
+                  <Icon icon={X} />
+                </button>
+              )}
+            </div>
+          )}
+          {rows.length > 0 && !hideCsv && (
+            <button
+              type="button"
+              className="small-button"
+              onClick={exportCsv}
+              aria-label={`Export ${title} as CSV`}
+              title="Export as CSV"
+            >
+              <Icon icon={Download} />
+              <span>CSV</span>
+            </button>
+          )}
+          {actions}
+          <span className="grid-card-count" aria-live="polite">
+            {loading ? "Loading…" : `${rows.length} row${rows.length === 1 ? "" : "s"}`}
           </span>
-        )}
-        <span style={{ color: '#475569', fontSize: 12, marginLeft: 'auto' }}>
-          {rows.length} row{rows.length !== 1 ? 's' : ''}
-        </span>
+        </div>
       </div>
-
-      {rows.length === 0 && !loading ? (
-        <div
-          role="status"
-          aria-label="No data available"
-          style={{ padding: 32, textAlign: 'center', color: '#475569' }}
-        >
-          No records found.
-        </div>
-      ) : (
-        <div className="ag-theme-alpine-dark" style={{ flex: 1 }}>
-          <AgGridReact
-            rowData={rows as Record<string, unknown>[]}
-            columnDefs={cols}
-            getRowId={getRowId ?? ((p: { data: unknown }) => (p.data as Record<string, unknown>)['id'] as string)}
-            onRowClicked={onRowClick ? (e) => onRowClick(e.data) : undefined}
-            pagination={true}
-            paginationPageSize={25}
-            paginationPageSizeSelector={[10, 25, 50, 100]}
-            defaultColDef={{ sortable: true, filter: true, resizable: true, flex: 1 }}
-            suppressCellFocus={false}
-            enableCellTextSelection={true}
-            domLayout="autoHeight"
-          />
-        </div>
-      )}
-    </div>
+      <div className="grid-card-body">
+        {loading && rows.length === 0 ? (
+          <Loading label={`Loading ${title.toLowerCase()}…`} />
+        ) : rows.length === 0 ? (
+          <EmptyState title="Nothing here yet">Records will appear here as soon as there is activity.</EmptyState>
+        ) : (
+          <div className="ag-theme-quartz">
+            <AgGridReact
+              theme="legacy"
+              rowData={rows as Record<string, unknown>[]}
+              columnDefs={cols}
+              getRowId={getRowId ?? ((p: { data: unknown }) => (p.data as Record<string, unknown>)["id"] as string)}
+              onRowClicked={onRowClick ? (e) => onRowClick(e.data) : undefined}
+              onCellKeyDown={
+                onRowClick
+                  ? (e) => {
+                    // Keyboard users select a row with Enter on a focused cell.
+                    const key = (e.event as KeyboardEvent | null)?.key;
+                    if (key === "Enter") onRowClick(e.data);
+                  }
+                  : undefined
+              }
+              onGridReady={onGridReady}
+              quickFilterText={filterText}
+              pagination={true}
+              paginationPageSize={25}
+              paginationPageSizeSelector={[10, 25, 50, 100]}
+              defaultColDef={{ sortable: true, filter: true, resizable: true, flex: 1, minWidth: 110 }}
+              enableCellTextSelection={true}
+              domLayout="autoHeight"
+            />
+          </div>
+        )}
+      </div>
+    </section>
   );
 };

@@ -1,0 +1,111 @@
+/*
+ * Stoat design tokens: the single source of truth for colour, type, space, radius, shadow
+ * and glass. Components use these variables and never raw colour values.
+ * scripts/verify/ui.ts reads this file to check WCAG contrast, so keep the names stable.
+ * Light theme only, tuned for a clean, trustworthy, commerce-style interface.
+ */
+:root {
+  /* Surfaces */
+  --bg-base: #f5f7fb;
+  --bg-tint-a: rgba(79, 112, 224, 0.16);
+  --bg-tint-b: rgba(20, 184, 166, 0.12);
+  --surface-solid: #ffffff;
+  --surface-muted: #eef2f8;
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-bg-subtle: rgba(255, 255, 255, 0.52);
+  --glass-bg-strong: rgba(255, 255, 255, 0.88);
+  --glass-border: rgba(255, 255, 255, 0.85);
+  --glass-border-subtle: rgba(255, 255, 255, 0.65);
+  --glass-hairline: rgba(15, 23, 42, 0.07);
+  --glass-blur: blur(18px) saturate(180%);
+  --border-subtle: rgba(15, 23, 42, 0.09);
+  --border-strong: rgba(15, 23, 42, 0.18);
+
+  /* Text */
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #556274;
+  --text-on-primary: #ffffff;
+
+  /* Brand and status. Each has a foreground that is readable on its own tint. */
+  --color-primary: #2754c5;
+  --color-primary-hover: #1f45a8;
+  --color-primary-tint: rgba(39, 84, 197, 0.1);
+  --color-success: #15803d;
+  --color-success-tint: rgba(21, 128, 61, 0.12);
+  --color-warning: #92400e;
+  --color-warning-tint: rgba(217, 119, 6, 0.15);
+  --color-danger: #b91c1c;
+  --color-danger-tint: rgba(185, 28, 28, 0.1);
+  --color-info: #075985;
+  --color-info-tint: rgba(3, 105, 161, 0.11);
+  --color-violet: #6d28d9;
+  --color-violet-tint: rgba(109, 40, 217, 0.1);
+  --color-neutral: #475569;
+  --color-neutral-tint: rgba(71, 85, 105, 0.11);
+
+  /* Typography */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Plus Jakarta Sans", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-material: "Material Symbols Outlined", sans-serif;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: clamp(1.5rem, 1.2rem + 1.2vw, 2rem);
+
+  /* Space, shape, depth */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+  --shadow-card: 0 1px 3px rgba(15, 23, 42, 0.03), 0 10px 28px -4px rgba(30, 50, 100, 0.08);
+  --shadow-raised: 0 2px 6px rgba(15, 23, 42, 0.05), 0 20px 48px -6px rgba(30, 50, 100, 0.14);
+  --focus-ring: 0 0 0 3px rgba(39, 84, 197, 0.35);
+
+  /* Layout */
+  --sidebar-width: 272px;
+  --content-max: 1320px;
+  --header-height: 60px;
+  --motion: 160ms ease;
+}
+
+/* Browsers without backdrop-filter get a more opaque card so text stays legible. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass-bg: rgba(255, 255, 255, 0.95);
+    --glass-bg-subtle: rgba(255, 255, 255, 0.90);
+    --glass-bg-strong: #ffffff;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass-bg: #ffffff;
+    --glass-bg-subtle: #ffffff;
+    --glass-bg-strong: #ffffff;
+    --glass-blur: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --border-subtle: rgba(15, 23, 42, 0.45);
+    --glass-hairline: rgba(15, 23, 42, 0.4);
+    --text-muted: #334155;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion: 0ms linear; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}

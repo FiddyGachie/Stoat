@@ -5,12 +5,11 @@ import { MissionsService } from '../modules/missions/missions.service.js';
 import { QuotesService } from '../modules/quotes/quotes.service.js';
 import { AgreementsService } from '../modules/agreements/agreements.service.js';
 import { DeliveriesService } from '../modules/deliveries/deliveries.service.js';
-import { ArtifactsService } from '../modules/artifacts/artifacts.service.js';
 import { LedgerService } from '../modules/ledger/ledger.service.js';
 import { SettlementService } from '../modules/settlement/settlement.service.js';
 import { EventsService } from '../modules/events/events.service.js';
 import { AgentRuntimeService } from '../modules/agent-runtime/agent-runtime.service.js';
-import { ForbiddenActionError, NotFoundError, StoatError } from '../common/errors.js';
+import { NotFoundError, StoatError } from '../common/errors.js';
 
 export interface McpToolDefinition {
   name: string;
@@ -29,6 +28,14 @@ export const FORBIDDEN_MCP_TOOLS = [
   'capture_payment',
   'release_hold',
   'override_policy',
+  // v2.1: no agent may touch money movement or where money goes
+  'create_paypal_order',
+  'capture_order',
+  'refund_payment',
+  'approve_payout',
+  'send_payout',
+  'set_payout_recipient',
+  'verify_payout_recipient',
 ];
 
 export const MCP_TOOL_DEFINITIONS: McpToolDefinition[] = [
@@ -234,7 +241,7 @@ export class McpServer {
               },
               serverInfo: {
                 name: 'stoat-mcp-server',
-                version: '2.0.0',
+                version: '2.1.0',
               },
             },
           };
