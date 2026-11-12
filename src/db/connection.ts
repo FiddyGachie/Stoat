@@ -21,6 +21,7 @@ import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { PGlite } from "@electric-sql/pglite";
 import * as schema from "./schema.js";
+import { AnalyticsTimeoutError } from "../modules/agentic/commerce-errors.js";
 
 export interface QueryResult<T = any> {
   rows: T[];
@@ -85,9 +86,14 @@ function buildPostgresOptions(url: string): postgres.Options<any> {
     idle_timeout: isTransactionPooler ? 20 : 30,
     connect_timeout: 10,
     // Recycle pooled connections (seconds) so a connection the pooler dropped is replaced.
-    max_lifetime: parseInt(process.env.PG_MAX_LIFETIME_S ?? (isTransactionPooler ? "300" : "1800"), 10),
+    max_lifetime: parseInt(
+      process.env.PG_MAX_LIFETIME_S ?? (isTransactionPooler ? "300" : "1800"),
+      10,
+    ),
     // Transaction pooling cannot keep prepared statements; PG_PREPARE=true forces them back on.
-    prepare: process.env.PG_PREPARE ? process.env.PG_PREPARE === "true" : !isTransactionPooler,
+    prepare: process.env.PG_PREPARE
+      ? process.env.PG_PREPARE === "true"
+      : !isTransactionPooler,
     ...(ssl !== undefined ? { ssl } : {}),
     // In ESM builds `postgres` uses native BigInt; coerce to string for compatibility
     // with existing code that treats NUMERIC columns as strings (Decimal.js).
@@ -233,6 +239,42 @@ export async function transaction<T>(
     () => undefined,
   );
   return run;
+}
+
+/**
+ * Run `fn` in a READ ONLY transaction with a statement timeout. A query that exceeds
+ * `timeoutMs` is cancelled (SQLSTATE 57014) and surfaces as `ANALYTICS_TIMEOUT`.
+ * Works on Postgres and PGlite; existing callers of `transaction` are unaffected.
+ */
+export async function readOnlyTransaction<T>(
+  fn: (client: DbClient) => Promise<T>,
+  options: { timeoutMs: number },
+): Promise<T> {
+  const timeoutMs = Math.max(1, Math.floor(options.timeoutMs));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new AnalyticsTimeoutError()), timeoutMs);
+  });
+  const work = transaction(async (tx) => {
+    await tx.exec("SET TRANSACTION READ ONLY");
+    await tx.exec(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    return fn(tx);
+  }).catch((err) => {
+    if ((err as { code?: string } | null)?.code === "57014")
+      throw new AnalyticsTimeoutError();
+    throw err;
+  });
+  try {
+    // The race backs up statement_timeout where the engine cannot cancel a running query.
+    const started = Date.now();
+    const result = await Promise.race([work, timedOut]);
+    // PGlite runs queries synchronously on the event loop, so the timer cannot fire mid-query.
+    if (Date.now() - started > timeoutMs) throw new AnalyticsTimeoutError();
+    return result;
+  } finally {
+    if (timer) clearTimeout(timer);
+    work.catch(() => undefined);
+  }
 }
 
 /** Tail of the PGlite transaction queue. */

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity, Bot, BookOpen, ExternalLink, FileSignature, Landmark, LayoutDashboard, LogOut,
-  Bell, Menu, PackageCheck, Receipt, Scale, ShieldCheck, Store, TrendingUp, X, type LucideIcon, ArrowLeftRight, Wallet, LayoutGrid
+  Bell, Menu, PackageCheck, Inbox, Stamp, BarChart3, ShieldAlert, Receipt, Scale, ShieldCheck, Store, TrendingUp, X, type LucideIcon, ArrowLeftRight, Wallet, LayoutGrid
 } from "lucide-react";
 import { EconomyWorkspace } from "./workspaces/EconomyWorkspace.js";
 import { AgentsWorkspace } from "./workspaces/AgentsWorkspace.js";
@@ -23,20 +23,30 @@ import { WalletWorkspace } from "./workspaces/WalletWorkspace.js";
 import { BusinessAccountWorkspace } from "./workspaces/BusinessAccountWorkspace.js";
 import { NotificationsWorkspace } from "./workspaces/NotificationsWorkspace.js";
 import { PerformanceDashboard } from "./components/PerformanceDashboard.js";
-import { useFetch } from "./hooks.js";
-import { api, Principal, setToken, SESSION_EXPIRED_EVENT } from "./api.js";
+import { ApprovalInboxWorkspace } from "./workspaces/ApprovalInboxWorkspace.js";
+import { MandatesWorkspace } from "./workspaces/MandatesWorkspace.js";
+import { PaymentsAnalyticsWorkspace } from "./workspaces/PaymentsAnalyticsWorkspace.js";
+import { WatchdogWorkspace } from "./workspaces/WatchdogWorkspace.js";
+import { useFetch, useLatestFetch } from "./hooks.js";
+import { useLiveRefresh } from "./live.js";
+import { api, agenticApi, Principal, setToken, SESSION_EXPIRED_EVENT, type AgenticFlagName } from "./api.js";
 import { StatusBadge } from "./components/StatusBadge.js";
 import { AuthScreen } from "./components/AuthScreen.js";
-import { BrandLogo, Icon, Loading, PageHeader } from "./components/ui.js";
+import { SplashScreen } from "./components/SplashScreen.js";
+import { BrandLogo, Icon, PageHeader } from "./components/ui.js";
 import { PaymentsDue } from "./components/PaymentsDue.js";
 
 export type WorkspaceId =
   | "economy" | "performance" | "exchange" | "quotes" | "agents" | "deliveries"
   | "obligations" | "settlement" | "payments" | "moneyflow" | "payment-journey" | "events" | "policy" | "integrity"
-  | "wallet" | "business-account" | "notifications";
+  | "wallet" | "business-account" | "notifications"
+  | "approvals" | "mandates" | "payments-analytics" | "watchdog";
 
-/** `roles`, when set, limits who sees the item and who can open its route. */
-interface NavItem { id: WorkspaceId; label: string; icon: LucideIcon; description: string; roles?: readonly string[] }
+/**
+ * `roles`, when set, limits who sees the item and who can open its route. `flag`, when set,
+ * also requires that Feature_Flag to be on for the tenant (from /v1/agentic/capabilities).
+ */
+interface NavItem { id: WorkspaceId; label: string; icon: LucideIcon; description: string; roles?: readonly string[]; flag?: AgenticFlagName }
 
 /** Roles that may open the platform-wide Business account (R15.17). */
 const ADMIN_ROLES = ["operator", "supervisor"] as const;
@@ -86,10 +96,24 @@ const EXTRA_ITEMS: NavItem[] = [
   { id: "payment-journey", label: "Payment Journey", icon: Wallet, description: "Pre-approve spending budgets, hold funds via PayPal, track micro-debits, and decide on remainders." },
   { id: "notifications", label: "Notifications", icon: Bell, description: "Wallet and mission updates addressed to you." },
 ];
-/** Can this principal see and open the item? Items without `roles` are open to every signed-in person. */
-const canOpen = (item: NavItem, role: string | undefined): boolean =>
-  !item.roles || (role !== undefined && item.roles.includes(role));
-const ROUTABLE_ITEMS = [...ALL_ITEMS, ...EXTRA_ITEMS];
+/** Agentic-commerce workspaces. Kept outside NAV_GROUPS; each shows only when its flag is on. */
+const AGENTIC_ROLES = ["buyer", "operator", "supervisor"] as const;
+const AGENTIC_ITEMS: NavItem[] = [
+  { id: "approvals", label: "Approval Inbox", icon: Inbox, description: "Proposals from agents that wait for a person to approve or reject.", roles: AGENTIC_ROLES, flag: "proposals" },
+  { id: "mandates", label: "Mandates", icon: Stamp, description: "Standing spending limits that let a buyer agent accept quotes on your behalf.", roles: AGENTIC_ROLES, flag: "mandates" },
+  { id: "payments-analytics", label: "Payments Analytics", icon: BarChart3, description: "Spend, utilization, alerts and PayPal status across your payments.", roles: AGENTIC_ROLES, flag: "payments_analytics" },
+  { id: "watchdog", label: "Watchdog", icon: ShieldAlert, description: "Anomaly alerts and holds placed to protect spending.", roles: AGENTIC_ROLES, flag: "watchdog" },
+];
+const AGENTIC_GROUP: NavGroup = { label: "Agentic commerce", items: AGENTIC_ITEMS };
+type Flags = Partial<Record<AgenticFlagName, boolean>> | undefined;
+/**
+ * Can this principal see and open the item? Items without `roles` are open to every signed-in
+ * person. An item with a `flag` also needs that flag on; unknown capabilities mean hidden.
+ */
+const canOpen = (item: NavItem, role: string | undefined, flags?: Flags, windDownMandates = false): boolean =>
+  (!item.roles || (role !== undefined && item.roles.includes(role))) &&
+  (!item.flag || flags?.[item.flag] === true || (item.id === "mandates" && windDownMandates));
+const ROUTABLE_ITEMS = [...ALL_ITEMS, ...EXTRA_ITEMS, ...AGENTIC_ITEMS];
 const DEFAULT_ID: WorkspaceId = "economy";
 const isWorkspaceId = (value: string): value is WorkspaceId => ROUTABLE_ITEMS.some((i) => i.id === value);
 
@@ -129,12 +153,31 @@ const WORKSPACES: Record<WorkspaceId, React.ReactNode> = {
   wallet: <WalletWorkspace />,
   "business-account": <BusinessAccountWorkspace />,
   notifications: <NotificationsWorkspace />,
+  // Placeholders until tasks 11.3 to 11.6 build the real workspaces.
+  approvals: <ApprovalInboxWorkspace />,
+  mandates: <MandatesWorkspace />,
+  "payments-analytics": <PaymentsAnalyticsWorkspace />,
+  watchdog: <WatchdogWorkspace />,
 };
+
+/** Live count of Proposals waiting for this person. Reads only; refreshes every 5 s. */
+function PendingBadge() {
+  const pending = useLatestFetch((signal) => agenticApi.proposals.pendingCount({ signal }), []);
+  useLiveRefresh(() => pending.reload(), 5000);
+  const count = pending.status === "ok" ? pending.data.count : 0;
+  if (count <= 0) return null;
+  return (
+    <span className="badge" style={{ marginLeft: "auto" }} aria-label={`${count} pending`}>
+      {count}
+    </span>
+  );
+}
 
 /** Hash routing: every screen has a shareable URL and the browser Back button works. */
 function useHashRoute(): [WorkspaceId, (id: WorkspaceId) => void] {
   const read = (): WorkspaceId => {
-    const raw = window.location.hash.replace(/^#\/?/, "");
+    // A route may carry a query, such as #/wallet?topup=<mission>&hint=<amount>.
+    const raw = window.location.hash.replace(/^#\/?/, "").split("?")[0] ?? "";
     return isWorkspaceId(raw) ? raw : DEFAULT_ID;
   };
   const [route, setRoute] = useState<WorkspaceId>(read);
@@ -154,6 +197,7 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [sessionNotice, setSessionNotice] = useState("");
   const [navOpen, setNavOpen] = useState(false);
+  const [splashDone, setSplashDone] = useState(false);
   const [active, go] = useHashRoute();
   const mainRef = useRef<HTMLElement>(null);
 
@@ -183,9 +227,23 @@ export default function App() {
   }, []);
 
   const role = principal?.type === "user" ? principal.role : undefined;
+  // Feature flags for this tenant. A failed or missing answer leaves every flagged entry hidden.
+  const isUser = principal?.type === "user";
+  const caps = useLatestFetch(
+    (signal) => (isUser ? agenticApi.capabilities({ signal }) : Promise.resolve(null)),
+    [isUser, token],
+  );
+  const flags: Flags = caps.status === "ok" ? caps.data?.flags : undefined;
+  // Wind-down (R15.7): with the mandates flag off, the entry stays only while Mandates exist.
+  const mandatesOff = isUser && flags !== undefined && flags.mandates !== true && role !== undefined && (AGENTIC_ROLES as readonly string[]).includes(role);
+  const existing = useLatestFetch(
+    (signal) => (mandatesOff ? agenticApi.mandates.list({ limit: 1 }, { signal }) : Promise.resolve(null)),
+    [mandatesOff, token],
+  );
+  const windDown = existing.status === "ok" && (existing.data?.mandates.length ?? 0) > 0;
   // A route the person's role may not open falls back to the default screen.
   const routed = ROUTABLE_ITEMS.find((i) => i.id === active);
-  const activeItem = routed && canOpen(routed, role) ? routed : ALL_ITEMS[0];
+  const activeItem = routed && canOpen(routed, role, flags, windDown) ? routed : ALL_ITEMS[0];
 
   // On every route change: close the drawer, set the tab title, and move focus to the page
   // heading so keyboard and screen-reader users land at the top of the new screen.
@@ -213,6 +271,10 @@ export default function App() {
     setSessionNotice("");
   };
 
+  if (!splashDone) {
+    return <SplashScreen onComplete={() => setSplashDone(true)} minDisplayTimeMs={1100} />;
+  }
+
   if (!token) {
     return (
       <AuthScreen
@@ -224,7 +286,7 @@ export default function App() {
   }
 
   if (apiStatus === "unknown") {
-    return <main className="auth-page"><Loading label="Connecting to Stoat…" /></main>;
+    return <SplashScreen />;
   }
 
   if (apiStatus === "error") {
@@ -238,7 +300,7 @@ export default function App() {
   }
 
   // buyer role → BuyerPortal, UNLESS they have navigated to a payment workspace via hash
-  const paymentWorkspaces: WorkspaceId[] = ["payments", "payment-journey", "moneyflow", "settlement", "wallet", "notifications"];
+  const paymentWorkspaces: WorkspaceId[] = ["payments", "payment-journey", "moneyflow", "settlement", "wallet", "notifications", "approvals", "mandates", "payments-analytics", "watchdog"];
   if (principal?.type === "user" && principal.role === "buyer" && !paymentWorkspaces.includes(activeItem.id)) {
     return <BuyerPortal principal={principal} onSignOut={signOut} />;
   }
@@ -289,23 +351,27 @@ export default function App() {
         </div>
 
         <nav aria-label="Workspaces">
-          {NAV_GROUPS.map((group) => (
-            <div className="nav-group" key={group.label} role="group" aria-label={group.label}>
-              <div className="nav-label" aria-hidden="true">{group.label}</div>
-              {group.items.filter((item) => canOpen(item, role)).map((item) => (
-                <a
-                  key={item.id}
-                  className="nav-item"
-                  href={`#/${item.id}`}
-                  aria-current={item.id === activeItem.id ? "page" : undefined}
-                  onClick={(e) => { e.preventDefault(); go(item.id); }}
-                >
-                  <Icon icon={item.icon} />
-                  {item.label}
-                </a>
-              ))}
-            </div>
-          ))}
+          {[...NAV_GROUPS, AGENTIC_GROUP]
+            .map((group) => ({ ...group, items: group.items.filter((item) => canOpen(item, role, flags, windDown)) }))
+            .filter((group) => group.items.length > 0)
+            .map((group) => (
+              <div className="nav-group" key={group.label} role="group" aria-label={group.label}>
+                <div className="nav-label" aria-hidden="true">{group.label}</div>
+                {group.items.map((item) => (
+                  <a
+                    key={item.id}
+                    className="nav-item"
+                    href={`#/${item.id}`}
+                    aria-current={item.id === activeItem.id ? "page" : undefined}
+                    onClick={(e) => { e.preventDefault(); go(item.id); }}
+                  >
+                    <Icon icon={item.icon} />
+                    {item.label}
+                    {item.id === "approvals" && <PendingBadge />}
+                  </a>
+                ))}
+              </div>
+            ))}
         </nav>
 
         <div className="sidebar-footer">
@@ -326,7 +392,7 @@ export default function App() {
         <div className="page">
           <PageHeader icon={activeItem.icon} title={activeItem.label} description={activeItem.description} />
           <PaymentsDue />
-          {WORKSPACES[activeItem.id]}
+          {activeItem.id === "mandates" ? <MandatesWorkspace role={role} /> : activeItem.id === "watchdog" ? <WatchdogWorkspace role={role} /> : WORKSPACES[activeItem.id]}
         </div>
       </main>
     </div>

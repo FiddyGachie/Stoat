@@ -254,6 +254,188 @@ npm run check
 
 This type-checks the server and console, runs the test suite, and runs the sign-in, owner-journey and interface verifiers. The journey verifier makes real PayPal Sandbox and model calls when credentials are set. Run it before every deploy.
 
+## Agentic commerce
+
+These features sit in the **Agentic commerce** group of the console navigation: **Approval Inbox**, **Mandates**, **Payments Analytics** and **Watchdog**. Each one shows only for buyers, operators and supervisors, and only when its flag is on for the tenant. None of them lets an agent move money. People approve, release and pay.
+
+### Feature flags
+
+All seven flags are off for every tenant until an operator or supervisor turns them on.
+
+| Flag                    | What it turns on                                                                 |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `mandates`              | Mandates: standing spending limits, and the **Mandates** workspace                |
+| `watchdog`              | The detectors, alerts and holds, and the **Watchdog** workspace                   |
+| `watchdog_explanations` | The model-written explanation on an alert (**Explain this Alert**)                |
+| `proposals`             | Agent proposals and the **Approval Inbox**                                        |
+| `payments_analytics`    | The **Payments Analytics** workspace and its datasets, charts and intents         |
+| `insights`              | The written insight on Payments Analytics                                         |
+| `nl_questions`          | Plain-language questions on Payments Analytics                                    |
+
+1. Read the current state with `GET /v1/agentic/capabilities`. Any signed-in user can call it.
+2. Set a flag with `PUT /v1/agentic/flags/:flag` and the body `{ "enabled": true }`. Only an operator or supervisor can call it. Each change is written to the audit log.
+3. A call to a feature whose flag is off is refused with `FEATURE_DISABLED`.
+
+Flags are stored per tenant and are read on every request, so a change takes effect at once with no restart. On the embedded PGlite database (local use) the data does not survive a restart, so flags reset and you must set them again. On PostgreSQL they persist.
+
+### Wallet mode
+
+Mandates need the tenant to be in wallet funding mode. Check or change it:
+
+1. `GET /v1/admin/funding-mode` returns the current mode, `direct` or `wallet`.
+2. `PUT /v1/admin/funding-mode` with `{ "funding_mode": "wallet" }` switches it. Only a signed-in operator or supervisor can do this, never an agent.
+3. If any agreement is `accepted`, `revision_requested` or `needs_review`, the switch is refused with `FUNDING_MODE_BUSY`. Wait for those agreements to finish, then try again.
+
+New tenants start in `direct` unless `DEFAULT_FUNDING_MODE` is `wallet`. A mandate request on a tenant in `direct` mode is refused with `MANDATE_REQUIRES_WALLET_MODE`.
+
+### Watchdog
+
+The Watchdog runs six detectors on a schedule (`WATCHDOG_INTERVAL_MS`). Each finding becomes an alert. Open the **Watchdog** workspace to see alerts, holds and thresholds.
+
+| Detector                   | What it looks for                              | Threshold (allowed range)                                          | Default response |
+| -------------------------- | ---------------------------------------------- | ------------------------------------------------------------------ | ---------------- |
+| `spend_spike`              | Spending far above the usual level             | `multiplier` 1.1 to 100, `min_observations` 3 to 60               | none             |
+| `price_outlier`            | A price far above comparable quotes            | `multiplier` 1.1 to 100, `min_observations` 3 to 200              | hold             |
+| `repeated_revision`        | Too many revision requests                     | `max_events` 1 to 20                                               | none             |
+| `unusual_provider`         | A high price from a provider with no history   | `min_price` 0.01 to 999999999.99 (a money string)                  | hold             |
+| `wallet_depleting`         | A wallet that will run out soon                | `horizon_hours` 1 to 168                                           | none             |
+| `reconciliation_exception` | A reconciliation problem that stays unresolved | `max_age_minutes` 5 to 10080                                       | none             |
+
+Defaults: `spend_spike` multiplier 3.0 and 5 observations, `price_outlier` multiplier 2.0 and 5 observations, `repeated_revision` 3 events, `unusual_provider` 500.00, `wallet_depleting` 24 hours, `reconciliation_exception` 60 minutes. `min_observations`, `max_events` and `max_age_minutes` must be whole numbers. A value outside its range is refused and the old value stays.
+
+To change a threshold:
+
+1. Call `GET /v1/admin/watchdog/thresholds` to see the current values.
+2. Call `PUT /v1/admin/watchdog/thresholds/:detector` with the new values. Operators and supervisors only.
+3. The response a detector applies is limited. `price_outlier` and `unusual_provider` can place a hold or suspend a mandate. `spend_spike` can suspend a mandate. The other three can only raise an alert.
+
+Alerts have a severity of `low`, `medium`, `high` or `critical`. An alert is `open` until the detector finds nothing wrong on two runs in a row, then it becomes `resolved`. A `high` or `critical` alert also sends an admin notification.
+
+An alert shows two kinds of text. The **evidence** is built from stored records and is the part to trust. The **explanation** is written by the model, is for reading only, and never changes the alert, a hold or a mandate. To get one:
+
+1. Turn on `watchdog_explanations`.
+2. Open a `medium`, `high` or `critical` alert and choose **Explain this Alert** (`POST /v1/watchdog/alerts/:id/explain`, operators and supervisors only).
+3. The explanation is stored with the alert. If the model fails, times out or returns an answer that fails the schema, nothing is stored and you see `AGENT_OUTPUT_INVALID` or `MODEL_TIMEOUT`.
+
+### Holds
+
+A hold freezes one money step until a person releases it. A hold can attach to a reservation, a settlement item, a settlement batch or a payout. While a hold is active:
+
+- the held step is refused with `HOLD_ACTIVE`;
+- accrual for a verified delivery waits instead of failing, and runs once the hold is released;
+- if accrual stays held longer than `HELD_ACCRUAL_MAX_DAYS`, you get a "Verified delivery accrual remains held" notification. Review the hold and the agreement.
+
+To release a hold:
+
+1. Open the hold in **Watchdog**, or call `GET /v1/watchdog/holds` and `GET /v1/watchdog/holds/:id`.
+2. Check the alert behind it.
+3. Release it with `POST /v1/watchdog/holds/:id/release` and a written reason of 1 to 500 characters.
+
+Operators and supervisors can release any hold. A buyer can release only a hold on their own wallet's reservation. An agent can never release a hold. An agent can only ask, which files a `hold_release` proposal in the Approval Inbox for a person to decide.
+
+### Approval Inbox (operator view)
+
+Agents file proposals. A person decides each one. Open **Approval Inbox**, or use `GET /v1/proposals`, `GET /v1/proposals/pending-count`, `GET /v1/proposals/:id`, `POST /v1/proposals/:id/approve` and `POST /v1/proposals/:id/reject`. Operators and supervisors see every proposal in the tenant. Owners see their own.
+
+| Proposal type      | Filed by          | Who decides      |
+| ------------------ | ----------------- | ---------------- |
+| `topup_suggestion` | budget agent      | The owner        |
+| `remainder_refund` | budget agent      | The owner        |
+| `mandate_change`   | budget or treasury agent | The owner |
+| `payout_batch`     | treasury agent    | An operator or supervisor |
+| `hold_release`     | watchdog agent    | An operator or supervisor |
+
+To decide one:
+
+1. Open the proposal and read the rationale and the checks.
+2. Approve or reject, with a comment of 1 to 500 characters.
+3. A proposal you filed yourself is refused with `SELF_APPROVAL`. Someone else must decide it.
+
+A proposal that is not decided expires after `PROPOSAL_TTL_HOURS` and shows as `expired` (`PROPOSAL_EXPIRED` if you try to decide it). If the facts changed since it was filed, approval fails the checks and the proposal becomes `invalid` (`PROPOSAL_INVALID`). A proposal over `PROPOSAL_MAX_BYTES` is refused with `PROPOSAL_TOO_LARGE`.
+
+Approval does not move money by itself. It queues a `proposal_execute` job. The job recomputes every amount from stored records at that moment, and it ignores the amount shown in the proposal, which is only a display hint. A payout batch proposal creates a settlement batch that still waits for the usual person approval and send. The job tries up to three times with backoff. After the third failure, or a permanent error, the proposal becomes `execution_failed` and you get a notification. The sweep also re-queues an approved proposal that has no job. The statuses are `pending`, `approved`, `rejected`, `expired`, `executed`, `execution_failed` and `invalid`.
+
+### Mandates (operator side)
+
+A mandate is a spending limit signed by a buyer. Operators and supervisors can list and read mandates (`GET /v1/mandates`, `GET /v1/mandates/:id`). Only the buyer who owns a mandate can create it or revoke it. Its terms cannot be edited (`MANDATE_TERMS_IMMUTABLE`). No mandate lives longer than `MANDATE_MAX_LIFETIME_DAYS`.
+
+A mandate becomes `suspended` when a Watchdog detector with the suspend response finds a problem. A suspended mandate accepts nothing.
+
+1. Open the alert that suspended the mandate and check the evidence.
+2. Lift it with `POST /v1/mandates/:id/lift-suspension` and a reason of 1 to 500 characters. Operators, supervisors and the owning buyer can do this. An agent cannot.
+3. The mandate returns to `active`, or to `expired` or `exhausted` if it ran out while suspended.
+
+The sweep runs every 30 seconds. It moves mandates to `expired` or `exhausted` when they reach their date or cap. A state that does not fit the request returns `MANDATE_STATE_CONFLICT`.
+
+### Payments Analytics (admin scope)
+
+Owners see only their own payments. Operators and supervisors see the whole tenant. Four intents are admin only: `open_alerts`, `alerts_by_detector`, `holds_summary` and `paypal_flows`. Payout data never shows a recipient. The routes are `/v1/analytics/payments/:dataset`, `/v1/analytics/payments/charts/:chart`, `/v1/analytics/payments/intents/:intent`, `/v1/analytics/payments/insights` and `/v1/analytics/payments/questions`.
+
+Limits you can tune: `ANALYTICS_TIMEOUT_MS` (a slow query ends with `ANALYTICS_TIMEOUT`), `INTENT_ROW_LIMIT`, `NL_QUESTION_RATE_LIMIT` and `AGENTIC_DAILY_MODEL_BUDGET_USD` (past it, model features refuse with `MODEL_BUDGET_EXCEEDED`). A question must be 1 to 500 characters. A question maps to one of the allowed read intents. It never runs free SQL.
+
+### Agent tools over REST and MCP
+
+Agents use eight tools through one gateway, so REST (`GET /v1/agent-tools`, `POST /v1/agent-tools/:tool`) and MCP give the same checks and results.
+
+| Tool                       | Kind    | Agent roles allowed                                       |
+| -------------------------- | ------- | --------------------------------------------------------- |
+| `payment_status`           | read    | buyer, provider, treasury, budget, watchdog, copilot      |
+| `mandate_remaining`        | read    | buyer, budget                                             |
+| `wallet_summary`           | read    | buyer, budget                                             |
+| `propose_topup`            | propose | budget                                                    |
+| `propose_remainder_refund` | propose | budget                                                    |
+| `propose_payout_batch`     | propose | treasury                                                  |
+| `propose_mandate_change`   | propose | budget, treasury                                          |
+| `propose_hold_release`     | propose | watchdog                                                  |
+
+No tool deposits, reserves, charges, captures, refunds, approves, sends or releases, and none reads or sets a payout recipient. A `propose_*` tool only files a draft proposal. Each principal is limited to `AGENT_TOOL_RATE_LIMIT` calls (default 120) and past it the call fails with `RATE_LIMITED`. Every call writes exactly one audit log row, whether it succeeds, is refused or fails.
+
+### Integrity check
+
+The integrity check looks for any sign that an agent touched money. It reports four kinds of violation: an agent-authored money event, a successful agent money action in the audit log, an agent ID in a human-only column (wallet deposits, wallet refunds, payout requests), and a tool run outside the eight tools.
+
+- Run it on demand with `POST /v1/admin/agentic/integrity-check` (operators and supervisors).
+- The sweep also queues one `agent_integrity_check` job per tenant every 24 hours.
+- It reads data and only writes notifications, so it is safe to repeat.
+
+Each violation sends one `agent_integrity_violation` admin notification that names the record. Treat it as an incident:
+
+1. Stop approving money movement for the tenant.
+2. Open the named record and find who or what wrote it, using the event stream and the `audit_logs` table.
+3. Suspend the agent involved if it is still active (see [Manage agents](#manage-agents)).
+4. Report it to the engineers. Do not edit the ledger to make the notification go away.
+
+### Agentic settings
+
+Set these in the environment. The defaults come from the code.
+
+| Variable                         | Default  | Meaning                                                         |
+| -------------------------------- | -------- | --------------------------------------------------------------- |
+| `MANDATE_MAX_LIFETIME_DAYS`      | `30`     | Longest life a mandate can have                                 |
+| `WATCHDOG_INTERVAL_MS`           | `300000` | How often the detectors run                                     |
+| `HOLD_RATE_LIMIT`                | `20`     | Limit on holds placed through the agent operation               |
+| `HELD_ACCRUAL_MAX_DAYS`          | `14`     | Days a verified delivery may stay held before you are notified  |
+| `PROPOSAL_TTL_HOURS`             | `24`     | Hours before an undecided proposal expires                      |
+| `PROPOSAL_RATE_LIMIT`            | `30`     | Limit on proposals filed                                        |
+| `PROPOSAL_MAX_BYTES`             | `65536`  | Largest proposal accepted                                       |
+| `ANALYTICS_TIMEOUT_MS`           | `10000`  | Time allowed for one analytics query                            |
+| `INTENT_ROW_LIMIT`               | `1000`   | Most rows one intent returns                                    |
+| `NL_QUESTION_RATE_LIMIT`         | `20`     | Limit on plain-language questions                               |
+| `AGENT_TOOL_RATE_LIMIT`          | `120`    | Limit on tool calls per principal                               |
+| `AGENTIC_DAILY_MODEL_BUDGET_USD` | `2`      | Daily model spend allowed for agentic features                  |
+
+Each must be a number of at least 1. An invalid value stops the feature that reads it with an error naming the variable.
+
+### Verify the agentic features
+
+```
+npm run verify:agentic
+```
+
+It runs five parts in order: `verify:agentic-boundary` (no agent path reaches a money action), `verify:agentic-concurrency` (parallel requests cannot overspend a mandate), `verify:agentic-injection` (hostile text in data is not obeyed), `verify:agentic-secrets` (no secret leaks) and `verify:agentic-invariants` (accounting and state rules hold).
+
+The concurrency part needs real PostgreSQL row locks. Without `DATABASE_URL` it prints a skip message and exits 0, which is a skip and not a pass. To run it, set `DATABASE_URL` in your shell to a disposable database, one you can wipe. Never point it at a shared, staging or production database.
+
 ## Known limitations
 
 - **Human steps:** a buyer must approve each order at PayPal, and payout confirmation depends on PayPal and the recipient. These steps are not automated.
@@ -263,6 +445,10 @@ This type-checks the server and console, runs the test suite, and runs the sign-
 - **Passwords:** no self-service reset or email verification; operators are reset with `admin:create`.
 - **Rate limits:** held in each server's memory; several API instances each keep their own counts.
 - **Sessions:** tokens cannot be revoked individually; suspending an agent works because every request re-checks it.
+
+- **Provider error logging (AS-N1):** provider error text is logged verbatim. If a model provider echoes a credential in an error message, the server log would print it. Stoat never adds the key itself, but redact provider errors before you rely on the logs. `npm run verify:agentic-secrets` reports this as AS-N1.
+- **Analytics filters:** the filters in Payments Analytics are applied in the browser to the rows already loaded, not by the server. A filtered view of a capped result can hide rows beyond `INTENT_ROW_LIMIT`.
+- **Flags on PGlite:** feature flags reset on restart when you use the embedded database.
 
 ## Troubleshooting
 
@@ -287,3 +473,17 @@ This type-checks the server and console, runs the test suite, and runs the sign-
 | Payout send refused after approval                                                               | A recipient, amount or obligation changed                                | Review the change, then approve again                                                                                                     |
 | `BATCH_ALREADY_FUNDED`                                                                           | The buyer already paid at acceptance                                     | Use **Release funded payment**                                                                                                            |
 | Batch stuck in reconciliation required                                                           | PayPal captured a different amount                                       | Investigate in the event stream; never edit the ledger to force a match                                                                   |
+| `FEATURE_DISABLED` | The feature's flag is off for the tenant | Turn it on with `PUT /v1/agentic/flags/:flag` |
+| An **Agentic commerce** entry is missing from the navigation | Flag off, or the role is not buyer, operator or supervisor | Check `GET /v1/agentic/capabilities` and set the flag |
+| Flags are off again after a restart | Local PGlite database | Set them again, or use PostgreSQL |
+| `FUNDING_MODE_BUSY` | An agreement is accepted, revision_requested or needs_review | Let those agreements finish, then switch again |
+| `HOLD_ACTIVE` | A hold covers that reservation, item, batch or payout | Review the alert, then release the hold with a reason |
+| `PROPOSAL_EXPIRED` or `PROPOSAL_INVALID` | Not decided within `PROPOSAL_TTL_HOURS`, or the facts changed | Ask the agent to file a new proposal |
+| `SELF_APPROVAL` | You tried to decide a proposal you filed | Ask another operator or supervisor |
+| Proposal stuck in `execution_failed` | The execution job failed three times | Read the notification and the job error, fix the cause, then file a new proposal |
+| `MANDATE_STATE_CONFLICT` | The mandate is not in a state that allows the action | Read its status, and lift a suspension if that is the cause |
+| `RATE_LIMITED` on an agent tool | Over `AGENT_TOOL_RATE_LIMIT` | Wait, or raise the limit |
+| `MODEL_BUDGET_EXCEEDED` | Daily model budget used up | Wait for the next day or raise `AGENTIC_DAILY_MODEL_BUDGET_USD` |
+| `ANALYTICS_TIMEOUT` | Query ran past `ANALYTICS_TIMEOUT_MS` | Narrow the date range |
+| `agent_integrity_violation` notification | A record shows an agent touching money | Follow the steps under Integrity check |
+| `verify:agentic-concurrency` says SKIPPED | `DATABASE_URL` is not set | Set it to a disposable PostgreSQL database in your shell |

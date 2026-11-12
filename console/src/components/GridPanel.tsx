@@ -32,6 +32,8 @@ interface Props {
   actions?: React.ReactNode;
   /** Hide the built-in CSV button when the caller offers a server-side export. */
   hideCsv?: boolean;
+  /** Pagination off, fixed body height, row virtualization on. For large row counts. */
+  virtualize?: boolean;
 }
 
 /** A data table presented as a glass card, with filtering, CSV export, loading, empty and error states. */
@@ -48,6 +50,7 @@ export const GridPanel: React.FC<Props> = ({
   onQuickFilterChange,
   actions,
   hideCsv,
+  virtualize,
 }) => {
   const [filterText, setFilterText] = useState(quickFilter ?? "");
   const gridApiRef = useRef<GridApi | null>(null);
@@ -140,7 +143,7 @@ export const GridPanel: React.FC<Props> = ({
         ) : rows.length === 0 ? (
           <EmptyState title="Nothing here yet">Records will appear here as soon as there is activity.</EmptyState>
         ) : (
-          <div className="ag-theme-quartz">
+          <div className="ag-theme-quartz" style={virtualize ? { height: 420 } : undefined}>
             <AgGridReact
               theme="legacy"
               rowData={rows as Record<string, unknown>[]}
@@ -158,12 +161,13 @@ export const GridPanel: React.FC<Props> = ({
               }
               onGridReady={onGridReady}
               quickFilterText={filterText}
-              pagination={true}
+              pagination={!virtualize}
               paginationPageSize={25}
               paginationPageSizeSelector={[10, 25, 50, 100]}
+
               defaultColDef={{ sortable: true, filter: true, resizable: true, flex: 1, minWidth: 110 }}
               enableCellTextSelection={true}
-              domLayout="autoHeight"
+              domLayout={virtualize ? "normal" : "autoHeight"}
             />
           </div>
         )}

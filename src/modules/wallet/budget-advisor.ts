@@ -18,6 +18,7 @@
 import { z } from "zod";
 import type { DbClient } from "../../db/connection.js";
 import { StoatError } from "../../common/errors.js";
+import { hasForbiddenKey } from "../agentic/redact.js";
 import { AgentRuntimeService } from "../agent-runtime/agent-runtime.service.js";
 import type { MissionWalletView } from "./mission-completion.service.js";
 
@@ -56,16 +57,10 @@ export const WalletAdviceSchema = z
 export type WalletAdvice = z.infer<typeof WalletAdviceSchema>;
 
 /** Keys that must never appear anywhere in advisor output, at any depth. */
-const DENIED_KEY =
-  /^(amount|currency|payee|recipient|payment[_-]?state|payout[_-]?recipient|receiver|payer)$/i;
 const DIGIT_OR_CURRENCY = /[\p{Nd}\p{Sc}]/u;
 
 function hasDeniedKey(v: unknown, depth = 0): boolean {
-  if (depth > 20 || v === null || typeof v !== "object") return false;
-  if (Array.isArray(v)) return v.some((x) => hasDeniedKey(x, depth + 1));
-  return Object.entries(v as Record<string, unknown>).some(
-    ([k, x]) => DENIED_KEY.test(k) || hasDeniedKey(x, depth + 1),
-  );
+  return hasForbiddenKey(v, depth);
 }
 
 export type AdviceValidation =

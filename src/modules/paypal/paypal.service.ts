@@ -12,6 +12,7 @@ import { PayoutService } from "../payments/payout.service.js";
 import { BudgetService } from "../payments/budget.service.js";
 import { DepositService } from "../wallet/deposit.service.js";
 import { RefundService } from "../wallet/refund.service.js";
+import { assertSettlementNotHeld } from "../watchdog/hold-guard.js";
 
 /** PayPal events that can change the state of a wallet refund. */
 const WALLET_REFUND_EVENTS = new Set([
@@ -93,6 +94,7 @@ export class PayPalService {
       throw new NotFoundError(`Settlement batch ${params.batchId} not found.`);
     }
     const batch = batchRes.rows[0];
+    await assertSettlementNotHeld(this.db, params.tenantId, batch.id);
     if (batch.status !== "approved") {
       throw new InvalidTransitionError(
         `PayPal order cannot be created for batch in status '${batch.status}'. Batch must be 'approved'.`,
@@ -260,6 +262,7 @@ export class PayPalService {
         payment_transaction_id: tx.id,
       };
     }
+    await assertSettlementNotHeld(this.db, params.tenantId, tx.batch_id);
 
     const cap = await this.gateway.captureOrder(
       params.orderId,

@@ -118,12 +118,23 @@ export async function setFundingMode(
         WHERE tenant_id = $1 AND status = ANY($2::text[])`,
       [input.tenantId, [...FUNDING_MODE_BUSY_STATUSES]],
     );
-    const n = busy.rows[0]?.n ?? 0;
+    const activeMandates = await tx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM mandates
+        WHERE tenant_id = $1 AND status IN ('active', 'suspended')`,
+      [input.tenantId],
+    );
+    const liveAgreements = busy.rows[0]?.n ?? 0;
+    const liveMandates = activeMandates.rows[0]?.n ?? 0;
+    const n = liveAgreements + liveMandates;
     if (n > 0) {
       throw new ConflictError(
         "FUNDING_MODE_BUSY",
-        "The funding mode cannot change while agreements are accepted, awaiting revision or awaiting review.",
-        { live_agreements: n, statuses: [...FUNDING_MODE_BUSY_STATUSES] },
+        "The funding mode cannot change while agreements or active or suspended Mandates are in use.",
+        {
+          live_agreements: liveAgreements,
+          active_or_suspended_mandates: liveMandates,
+          statuses: [...FUNDING_MODE_BUSY_STATUSES],
+        },
       );
     }
 

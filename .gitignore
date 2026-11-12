@@ -97,6 +97,7 @@ agents/
 CLAUDE.md
 GEMINI.md
 AGENTS.md
+STORY.md
 TASKS.md
 MANIFEST.json
 CHANGES_v2.1.md
@@ -107,3 +108,20 @@ mcp.json
 *_out.txt
 *_log.txt
 coverage/
+
+recordings/
+STORY.md
+docs/DEMO_SCRIPT.md
+scripts/record-presentation.cjs
+.agents/reports/
+
+# Local marketing / non-app artifacts
+rtte.txt
+/thumbnail.png
+/thumbnail-art.jpg
+scripts/record-marketing-presentation.cjs
+scripts/capture-splash.cjs
+scripts/generate-thumbnail.cjs
+JUDGES_SETUP.txt
+console/public/splash-preview.png
+console/public/thumbnail-art.jpg

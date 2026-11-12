@@ -26,6 +26,7 @@ import { walletCurrencies } from "./wallet-config.js";
 import { appendWalletEvent } from "./wallet-events.js";
 import { notifyInTx } from "./notification.service.js";
 import { recomputeMissionFunding } from "./mission-funding.service.js";
+import { reactivateIfUnderCap } from "../mandates/mandate-acceptance.js";
 
 export interface ReservationRow {
   id: string;
@@ -55,6 +56,7 @@ export interface ReserveInput {
   /** Acting buyer agent (event actor only; never a source of wallet, amount or currency). */
   actorId?: string;
   correlationId?: string;
+  mandateId?: string;
 }
 
 export interface ReserveResult {
@@ -191,10 +193,10 @@ export async function reserveInTx(
 
   const ins = await tx.query(
     `INSERT INTO wallet_reservations
-       (id, tenant_id, wallet_id, mission_id, agreement_id, amount, currency, status)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'active')
+       (id, tenant_id, wallet_id, mission_id, agreement_id, amount, currency, status, mandate_id)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'active', $7)
      RETURNING *`,
-    [input.tenantId, found.id, mission.id, agreement.id, price.value, currency],
+    [input.tenantId, found.id, mission.id, agreement.id, price.value, currency, input.mandateId ?? null],
   );
   const reservation = norm(ins.rows[0]);
 
@@ -270,7 +272,13 @@ export async function releaseReservationInTx(
   if (!first.rows[0]) return null;
   if (first.rows[0].status !== "active") return norm(first.rows[0]);
 
-  // Lock order: wallet, then reservation.
+  if (first.rows[0].mandate_id) {
+    await tx.query(
+      "SELECT id FROM mandates WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+      [first.rows[0].mandate_id, p.tenantId],
+    );
+  }
+  // Lock order: mandate, wallet, then reservation.
   await tx.query(`SELECT id FROM wallets WHERE id = $1 FOR UPDATE`, [
     first.rows[0].wallet_id,
   ]);
@@ -306,6 +314,12 @@ export async function releaseReservationInTx(
     idempotencyKey: `wallet-reservation-release:${row.id}`,
   });
   await recomputeMissionFunding(tx, row.mission_id);
+  if (first.rows[0].mandate_id) {
+    await reactivateIfUnderCap(tx, {
+      tenantId: p.tenantId,
+      mandateId: first.rows[0].mandate_id,
+    });
+  }
   return row;
 }
 

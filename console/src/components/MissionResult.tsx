@@ -3,6 +3,7 @@ import { FileCheck2 } from 'lucide-react';
 import { api, AgreementResult } from '../api.js';
 import { Icon } from './ui.js';
 import { StatusBadge } from './StatusBadge.js';
+import { AutonomousLabel } from './agentic/labels.js';
 
 const SEVERITY_VARIANT: Record<string, 'error' | 'warning' | 'info'> = { critical: 'error', high: 'error', medium: 'warning', low: 'info' };
 
@@ -34,6 +35,9 @@ export const MissionResult: React.FC<{ agreementId: string }> = ({ agreementId }
       {open && error && <p className="notice notice-error" role="alert">{error}</p>}
       {open && data && (
         <div className="notice" role="region" aria-label="Delivered result">
+          {data.agreement.mandate_id && (
+            <p><AutonomousLabel mandateId={data.agreement.mandate_id} replayed={data.agreement.replayed} /></p>
+          )}
           {r ? (
             <>
               <p>

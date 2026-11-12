@@ -367,14 +367,28 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  updateMission: (missionId: string, input: { title?: string; brief?: string; budget?: string }) =>
-    apiFetch<Mission>(`/missions/${missionId}`, { method: "PATCH", body: JSON.stringify(input) }),
+  updateMission: (
+    missionId: string,
+    input: { title?: string; brief?: string; budget?: string },
+  ) =>
+    apiFetch<Mission>(`/missions/${missionId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
   deleteMission: (missionId: string) =>
-    apiFetch<{ id: string; status: string; withdrawn_quotes: number }>(`/missions/${missionId}`, { method: "DELETE" }),
+    apiFetch<{ id: string; status: string; withdrawn_quotes: number }>(
+      `/missions/${missionId}`,
+      { method: "DELETE" },
+    ),
   replayMission: (missionId: string) =>
-    apiFetch<MissionReplayResult>(`/missions/${missionId}/replay`, { method: "POST", body: "{}" }),
+    apiFetch<MissionReplayResult>(`/missions/${missionId}/replay`, {
+      method: "POST",
+      body: "{}",
+    }),
   missionResults: (missionId?: string) =>
-    apiFetch<{ results: MissionResultRecord[] }>(`/mission-results${missionId ? `?mission_id=${missionId}` : ""}`),
+    apiFetch<{ results: MissionResultRecord[] }>(
+      `/mission-results${missionId ? `?mission_id=${missionId}` : ""}`,
+    ),
   missionQuotes: (missionId: string) =>
     apiFetch<{ quotes: MissionQuote[] }>(`/missions/${missionId}/quotes`),
   requestQuote: (input: {
@@ -646,9 +660,14 @@ export const api = {
         body: JSON.stringify(input),
       }),
     remove: (budgetId: string) =>
-      apiFetch<{ budget: Row; deleted: boolean }>(`/budgets/${budgetId}`, { method: "DELETE" }),
+      apiFetch<{ budget: Row; deleted: boolean }>(`/budgets/${budgetId}`, {
+        method: "DELETE",
+      }),
     sync: (budgetId: string) =>
-      apiFetch<{ budget: Row }>(`/budgets/${budgetId}/sync`, { method: "POST", body: "{}" }),
+      apiFetch<{ budget: Row }>(`/budgets/${budgetId}/sync`, {
+        method: "POST",
+        body: "{}",
+      }),
 
     cancel: (budgetId: string) =>
       apiFetch<{ budget: Row }>(`/budgets/${budgetId}/cancel`, {
@@ -929,7 +948,10 @@ const qs = (params?: Record<string, string | undefined>): string => {
 export const walletApi = {
   overview: () => apiFetch<WalletOverview>("/wallet"),
   createWallet: (currency: string) =>
-    apiFetch<WalletView>("/wallet", { method: "POST", body: JSON.stringify({ currency }) }),
+    apiFetch<WalletView>("/wallet", {
+      method: "POST",
+      body: JSON.stringify({ currency }),
+    }),
   deposits: () => apiFetch<{ deposits: WalletDeposit[] }>("/wallet/deposits"),
   deposit: (id: string) => apiFetch<WalletDeposit>(`/wallet/deposits/${id}`),
   refreshDeposit: (id: string) =>
@@ -1084,6 +1106,233 @@ export const walletApi = {
   },
 };
 
+/** Feature flags the server reports per tenant (GET /v1/agentic/capabilities). */
+export type AgenticFlagName =
+  | "mandates"
+  | "watchdog"
+  | "watchdog_explanations"
+  | "proposals"
+  | "payments_analytics"
+  | "insights"
+  | "nl_questions";
+export interface AgenticCapabilities {
+  flags: Partial<Record<AgenticFlagName, boolean>>;
+  adapter_mode: string;
+  paypal_environment: string;
+}
+type AgenticRow = Record<string, unknown>;
+type Signal = { signal?: AbortSignal };
+const agenticQs = (
+  params?: Record<string, string | number | undefined | null>,
+): string => {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(params ?? {}))
+    if (v !== undefined && v !== null && v !== "") p.set(k, String(v));
+  const s = p.toString();
+  return s ? `?${s}` : "";
+};
+
+/**
+ * Typed agentic-commerce calls: Mandates, Proposals, Watchdog, Analytics and capabilities.
+ * Money_Boundary: none of these set an amount, currency, payee or payment state. A person
+ * decides Proposals; the server executes them. There is no call that moves money directly.
+ * The agent-only route POST /missions/:id/mandate-selection is intentionally absent.
+ */
+export const agenticApi = {
+  capabilities: (o?: Signal) =>
+    apiFetch<AgenticCapabilities>("/agentic/capabilities", {
+      signal: o?.signal,
+    }),
+  setFlag: (flag: AgenticFlagName, enabled: boolean) =>
+    apiFetch<{ flags: AgenticCapabilities["flags"] }>(
+      `/agentic/flags/${flag}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      },
+    ),
+
+  mandates: {
+    list: (p?: { limit?: number; offset?: number }, o?: Signal) =>
+      apiFetch<{ mandates: AgenticRow[] }>(`/mandates${agenticQs(p)}`, {
+        signal: o?.signal,
+      }),
+    get: (id: string, o?: Signal) =>
+      apiFetch<AgenticRow>(`/mandates/${id}`, { signal: o?.signal }),
+    create: (body: AgenticRow, key?: string) =>
+      apiFetch<AgenticRow>("/mandates", {
+        method: "POST",
+        headers: keyed(key),
+        body: JSON.stringify(body),
+      }),
+    revoke: (id: string) =>
+      apiFetch<AgenticRow>(`/mandates/${id}`, { method: "DELETE" }),
+    liftSuspension: (id: string, reason: string) =>
+      apiFetch<AgenticRow>(`/mandates/${id}/lift-suspension`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      }),
+  },
+
+  proposals: {
+    list: (
+      p?: { status?: string; type?: string; limit?: number; offset?: number },
+      o?: Signal,
+    ) =>
+      apiFetch<{ proposals: AgenticRow[] }>(`/proposals${agenticQs(p)}`, {
+        signal: o?.signal,
+      }),
+    pendingCount: (o?: Signal) =>
+      apiFetch<{ count: number }>("/proposals/pending-count", {
+        signal: o?.signal,
+      }),
+    get: (id: string, o?: Signal) =>
+      apiFetch<AgenticRow>(`/proposals/${id}`, { signal: o?.signal }),
+    approve: (id: string, comment?: string) =>
+      apiFetch<AgenticRow>(`/proposals/${id}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ comment }),
+      }),
+    reject: (id: string, reason: string) =>
+      apiFetch<AgenticRow>(`/proposals/${id}/reject`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      }),
+  },
+
+  watchdog: {
+    alerts: (
+      p?: {
+        status?: string;
+        severity?: string;
+        detector?: string;
+        limit?: number;
+        offset?: number;
+      },
+      o?: Signal,
+    ) =>
+      apiFetch<{ alerts: AgenticRow[] }>(`/watchdog/alerts${agenticQs(p)}`, {
+        signal: o?.signal,
+      }),
+    alert: (id: string, o?: Signal) =>
+      apiFetch<{ alert: AgenticRow; explanation: AgenticRow | null }>(
+        `/watchdog/alerts/${id}`,
+        { signal: o?.signal },
+      ),
+    explain: (id: string) =>
+      apiFetch<{ explanation: AgenticRow | null }>(
+        `/watchdog/alerts/${id}/explain`,
+        { method: "POST", body: "{}" },
+      ),
+    holds: (
+      p?: { status?: string; limit?: number; offset?: number },
+      o?: Signal,
+    ) =>
+      apiFetch<{ holds: AgenticRow[] }>(`/watchdog/holds${agenticQs(p)}`, {
+        signal: o?.signal,
+      }),
+    hold: (id: string, o?: Signal) =>
+      apiFetch<{ hold: AgenticRow }>(`/watchdog/holds/${id}`, {
+        signal: o?.signal,
+      }),
+    placeHold: (body: {
+      subject_type: string;
+      subject_id: string;
+      reason_code: string;
+      alert_id?: string;
+    }) =>
+      apiFetch<{ hold: AgenticRow }>("/watchdog/holds", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    releaseHold: (id: string, reason: string) =>
+      apiFetch<{ hold: AgenticRow }>(`/watchdog/holds/${id}/release`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      }),
+    thresholds: (o?: Signal) =>
+      apiFetch<{ detectors: string[]; thresholds: AgenticRow }>(
+        "/admin/watchdog/thresholds",
+        { signal: o?.signal },
+      ),
+    setThreshold: (
+      detector: string,
+      body: { params?: AgenticRow; response?: string },
+    ) =>
+      apiFetch<{ detector: string; threshold: AgenticRow }>(
+        `/admin/watchdog/thresholds/${detector}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(body),
+        },
+      ),
+  },
+
+  analytics: {
+    dataset: (
+      name: string,
+      p?: Record<string, string | undefined>,
+      o?: Signal,
+    ) =>
+      apiFetch<AgenticRow>(`/analytics/payments/${name}${agenticQs(p)}`, {
+        signal: o?.signal,
+      }),
+    chart: (name: string, p?: Record<string, string | undefined>, o?: Signal) =>
+      apiFetch<AgenticRow>(
+        `/analytics/payments/charts/${name}${agenticQs(p)}`,
+        { signal: o?.signal },
+      ),
+    /** Digest plus a model-written narrative. The model never changes a digest figure (R12). */
+    insights: (body: { from?: string; to?: string }) =>
+      apiFetch<AgenticInsightResponse>("/analytics/payments/insights", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    /** Maps a question to one catalog Read_Intent. Read-only; never a mutation (R13). */
+    ask: (text: string) =>
+      apiFetch<AgenticQuestionResponse>("/analytics/payments/questions", {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      }),
+    /** Runs a follow-up intent only because a person selected it. Scope comes from the session. */
+    runIntent: (intent: string, params: Record<string, unknown>) =>
+      apiFetch<AgenticIntentResult>(
+        `/analytics/payments/intents/${encodeURIComponent(intent)}`,
+        { method: "POST", body: JSON.stringify({ params }) },
+      ),
+  },
+};
+
+import type {
+  AgenticDigestFigure,
+  AgenticIntentResult,
+} from "./agenticTypes.js";
+export type { AgenticDigestFigure, AgenticIntentResult };
+export interface AgenticInsightResponse {
+  digest: { figures: AgenticDigestFigure[] };
+  digest_hash?: string;
+  narrative: {
+    narrative: {
+      headline: string;
+      findings: Array<{ text: string; cites: string[] }>;
+      follow_ups: Array<{ intent: string; params: Record<string, unknown> }>;
+    };
+    replayed: boolean;
+    model_id: string;
+  } | null;
+  notice: string | null;
+  notice_text?: string;
+}
+export interface AgenticQuestionResponse {
+  question_id: string;
+  outcome: "intent" | "unsupported";
+  intent: string | null;
+  params: Record<string, unknown> | null;
+  result: AgenticIntentResult | null;
+  allowed_intents: Array<{ name: string; description: string }>;
+  replayed: boolean;
+}
+
 export function setToken(token: string) {
   localStorage.setItem("stoat_token", token);
 }
@@ -1128,6 +1377,10 @@ export interface AgreementResult {
     price: string;
     currency: string;
     funding_status: string;
+    /** Set when a buyer agent accepted this quote under a Mandate. */
+    mandate_id?: string | null;
+    /** True when the buyer agent's selection came from a replayed model response. */
+    replayed?: boolean;
   };
   mission: { id: string; title: string; brief: string };
   provider: { id: string; name: string };

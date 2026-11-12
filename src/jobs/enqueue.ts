@@ -16,3 +16,34 @@ export async function enqueueProviderReview(db: DbClient, p: { tenantId: string;
     [p.tenantId, p.agreementId]
   );
 }
+
+export async function enqueueHeldAccrual(
+  db: DbClient,
+  p: {
+    tenantId: string;
+    agreementId: string;
+    deliveryId: string;
+    correlationId?: string;
+  },
+): Promise<void> {
+  await db.query(
+    `INSERT INTO jobs (tenant_id, type, payload, status, priority, run_after)
+     SELECT $1::uuid, 'held_accrual',
+       jsonb_build_object(
+         'tenant_id', $1::text,
+         'agreement_id', $2::text,
+         'delivery_id', $3::text,
+         'correlation_id', $4::text,
+         'queued_at', now()::text
+       ),
+       'queued', 6, now() + interval '60 seconds'
+     WHERE NOT EXISTS (
+       SELECT 1 FROM jobs
+       WHERE tenant_id = $1::uuid AND type = 'held_accrual'
+         AND payload->>'agreement_id' = $2::text
+         AND payload->>'delivery_id' = $3::text
+         AND status IN ('queued', 'running')
+     )`,
+    [p.tenantId, p.agreementId, p.deliveryId, p.correlationId ?? null],
+  );
+}

@@ -4,7 +4,7 @@ import { api, walletApi, WalletDeposit } from "../api.js";
 import { MissionsSection } from "./WalletMissions.js";
 import { useLiveRefresh } from "../live.js";
 import { WalletActivity } from "./WalletActivity.js";
-import { Card, EmptyState, Loading, PageHeader } from "../components/ui.js";
+import { Card, EmptyState, Loading } from "../components/ui.js";
 import { useFetch } from "../hooks.js";
 import { formatAmount, formatMoney, validateDepositAmount } from "../money.js";
 import {
@@ -220,11 +220,6 @@ export function WalletWorkspace() {
 
   return (
     <>
-      <PageHeader
-        icon={Wallet}
-        title="Wallet"
-        description={HOLDING_ACCOUNT_NOTE}
-      />
 
       <nav aria-label="Wallet sections" style={{ display: "flex", gap: "var(--space-2)", flexWrap: "wrap" }}>
         {SECTIONS.map((s) => (

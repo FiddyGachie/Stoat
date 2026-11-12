@@ -46,10 +46,33 @@ const CounterofferSchema = z.object({
   alternatives_considered: z.array(z.object({ quote_id: z.string().uuid(), reason: z.string().max(300) })).max(10),
 });
 
-interface OpenQuote {
+export interface OpenQuote {
   quote_id: string; service_id: string; provider_id: string; provider_name: string; service_name: string;
   description: string; category: string; price: string; currency: string; min_price: string | null;
   allowed_rules: string[]; expires_at: Date | string;
+}
+
+export async function openQuotes(db: DbClient, tenantId: string, missionId: string): Promise<OpenQuote[]> {
+  const res = await db.query<any>(
+    `SELECT q.id AS quote_id, q.service_id, q.provider_id, ag.name AS provider_name, s.name AS service_name,
+            s.description, s.category, q.price, q.currency, s.min_price, s.verification_profile, q.expires_at
+     FROM quotes q
+     JOIN quote_requests qr ON qr.id = q.quote_request_id
+     JOIN services s ON s.id = q.service_id
+     JOIN agents ag ON ag.id = q.provider_id
+     WHERE q.tenant_id = $1 AND qr.mission_id = $2 AND q.status = 'offered' AND q.expires_at > now()
+     ORDER BY q.created_at`,
+    [tenantId, missionId],
+  );
+  return res.rows.map((r) => {
+    const profile = typeof r.verification_profile === "string" ? JSON.parse(r.verification_profile) : r.verification_profile;
+    return {
+      quote_id: r.quote_id, service_id: r.service_id, provider_id: r.provider_id, provider_name: r.provider_name,
+      service_name: r.service_name, description: r.description, category: r.category,
+      price: toDecimalString(r.price), currency: r.currency, min_price: r.min_price == null ? null : toDecimalString(r.min_price),
+      allowed_rules: asArray(profile?.allowed_rules), expires_at: r.expires_at,
+    };
+  });
 }
 
 /** Schema check that reports the first problem in words the model can act on. */
@@ -66,29 +89,6 @@ const SYSTEM = 'You are a procurement agent negotiating on behalf of a buyer. Yo
 
 export class NegotiationService {
   constructor(private db: DbClient, private runtime: AgentRuntimeService = new AgentRuntimeService(db)) {}
-
-  private async openQuotes(tenantId: string, missionId: string): Promise<OpenQuote[]> {
-    const res = await this.db.query<any>(
-      `SELECT q.id AS quote_id, q.service_id, q.provider_id, ag.name AS provider_name, s.name AS service_name,
-              s.description, s.category, q.price, q.currency, s.min_price, s.verification_profile, q.expires_at
-       FROM quotes q
-       JOIN quote_requests qr ON qr.id = q.quote_request_id
-       JOIN services s ON s.id = q.service_id
-       JOIN agents ag ON ag.id = q.provider_id
-       WHERE q.tenant_id = $1 AND qr.mission_id = $2 AND q.status = 'offered' AND q.expires_at > now()
-       ORDER BY q.created_at`,
-      [tenantId, missionId]
-    );
-    return res.rows.map((r) => {
-      const profile = typeof r.verification_profile === 'string' ? JSON.parse(r.verification_profile) : r.verification_profile;
-      return {
-        quote_id: r.quote_id, service_id: r.service_id, provider_id: r.provider_id, provider_name: r.provider_name,
-        service_name: r.service_name, description: r.description, category: r.category,
-        price: toDecimalString(r.price), currency: r.currency, min_price: r.min_price == null ? null : toDecimalString(r.min_price),
-        allowed_rules: asArray(profile?.allowed_rules), expires_at: r.expires_at,
-      };
-    });
-  }
 
   /** The deterministic validator. The model's output can never widen these bounds. */
   static validateCounteroffer(c: z.infer<typeof CounterofferSchema>, quote: OpenQuote, remainingBudget: Decimal): string[] {
@@ -130,7 +130,7 @@ export class NegotiationService {
     );
     const mission = m.rows[0];
     if (!mission || mission.buyer_id !== p.buyerAgentId) throw new NotFoundError('Mission', p.missionId);
-    const quotes = await this.openQuotes(p.tenantId, p.missionId);
+    const quotes = await openQuotes(this.db, p.tenantId, p.missionId);
     if (quotes.length === 0) throw new ConflictError('NO_OPEN_QUOTES', 'There are no open quotes to compare. Request a quote first.');
     const remaining = new Decimal(mission.budget).minus(mission.reserved_budget);
     const byId = new Map(quotes.map((q) => [q.quote_id, q]));

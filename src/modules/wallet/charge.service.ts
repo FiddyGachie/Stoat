@@ -15,6 +15,7 @@ import { formatMoney } from "./wallet-math.js";
 import { appendWalletEvent } from "./wallet-events.js";
 import { postJournal } from "./wallet-ledger.js";
 import { recomputeMissionFunding } from "./mission-funding.service.js";
+import { assertNotHeld } from "../watchdog/hold-guard.js";
 
 export interface ChargeRow {
   id: string;
@@ -90,6 +91,9 @@ export async function chargeInTx(
       { agreement_id: obligation.agreement_id, status: reservation.status },
     );
   }
+  await assertNotHeld(tx, input.tenantId, [
+    { type: "reservation", id: reservation.id },
+  ]);
   await assertWalletUsable(tx, reservation.wallet_id);
 
   const amount = new Decimal(String(obligation.amount));

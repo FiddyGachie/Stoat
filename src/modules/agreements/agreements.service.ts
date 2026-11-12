@@ -8,6 +8,8 @@ import {
   QuoteExpiredError,
   PolicyDeniedError,
   BudgetExceededError,
+  ForbiddenActionError,
+  ValidationError as InputValidationError,
 } from "../../common/errors.js";
 import { toDecimalString } from "../../common/decimal.js";
 import { enqueueProviderReview } from "../../jobs/enqueue.js";
@@ -16,6 +18,12 @@ import {
   reserveInTx,
   notifyInsufficientFunds,
 } from "../wallet/reservation.service.js";
+import {
+  evaluateMandateInTx,
+  recordAcceptanceInTx,
+} from "../mandates/mandate-acceptance.js";
+import { MandateRefusalError } from "../agentic/commerce-errors.js";
+import { recordRefusal } from "../agentic/redact.js";
 
 const agreementPrice = (a: { price: unknown }) => String(a.price);
 
@@ -25,6 +33,10 @@ export interface AcceptQuoteInput {
   quoteId: string;
   /** A SELECTION proposal from the buyer agent's negotiation. Re-validated here; never trusted as given. */
   proposalId?: string;
+  mandateId?: string;
+  idempotencyKey?: string;
+  agentRunId?: string;
+  actorType?: "agent" | "user";
   correlationId?: string;
 }
 
@@ -52,6 +64,36 @@ export class AgreementsService {
         }
 
         const quote = quoteRes.rows[0];
+
+        if (input.mandateId) {
+          if (input.actorType !== "agent") throw new ForbiddenActionError();
+          if (!input.idempotencyKey) {
+            throw new InputValidationError("Idempotency-Key is required for Mandate acceptance.", {
+              fields: ["Idempotency-Key"],
+            });
+          }
+          const prior = await tx.query<{
+            quote_id: string;
+            agreement_id: string;
+          }>(
+            `SELECT quote_id, agreement_id FROM mandate_acceptances
+             WHERE tenant_id = $1 AND mandate_id = $2 AND idempotency_key = $3`,
+            [input.tenantId, input.mandateId, input.idempotencyKey],
+          );
+          if (prior.rows[0]) {
+            if (prior.rows[0].quote_id !== quote.id) {
+              throw new ConflictError(
+                "IDEMPOTENCY_CONFLICT",
+                "The Idempotency-Key was already used for a different quote.",
+              );
+            }
+            const existing = await tx.query(
+              "SELECT * FROM agreements WHERE id = $1 AND tenant_id = $2",
+              [prior.rows[0].agreement_id, input.tenantId],
+            );
+            if (existing.rows[0]) return existing.rows[0];
+          }
+        }
 
         // Check state
         if (quote.status === "accepted") {
@@ -102,11 +144,12 @@ export class AgreementsService {
         // 2b. Negotiated price (v2.1). The proposal is only a request: the price must still be inside the
         // quote and the provider's floor, and the spending policy below still decides.
         let agreedPrice = toDecimalString(quote.price);
-        let proposal: { id: string; payload: any } | null = null;
+        let proposal: { id: string; payload: any; proposalType: string } | null = null;
         if (input.proposalId) {
           const pr = await tx.query(
-            `SELECT id, payload FROM commercial_proposals
-           WHERE tenant_id = $1 AND id = $2 AND mission_id = $3 AND quote_id = $4 AND proposal_type = 'SELECTION'
+            `SELECT id, payload, proposal_type FROM commercial_proposals
+           WHERE tenant_id = $1 AND id = $2 AND mission_id = $3 AND quote_id = $4
+             AND proposal_type IN ('SELECTION', 'MANDATE_SELECTION')
              AND deterministic_validation = 'passed' AND accepted_agreement_id IS NULL FOR UPDATE`,
             [input.tenantId, input.proposalId, missionId, quote.id],
           );
@@ -118,33 +161,59 @@ export class AgreementsService {
           }
           proposal = {
             id: pr.rows[0].id,
+            proposalType: pr.rows[0].proposal_type,
             payload:
               typeof pr.rows[0].payload === "string"
                 ? JSON.parse(pr.rows[0].payload)
                 : pr.rows[0].payload,
           };
-          const amount = new Decimal(proposal.payload.agreed_amount);
-          const floorRes = await tx.query(
-            "SELECT min_price FROM services WHERE id = $1",
-            [quote.service_id],
-          );
-          const floor = floorRes.rows[0]?.min_price;
-          const listed = new Decimal(quote.price);
-          const ok =
-            amount.greaterThan(0) &&
-            amount.lessThanOrEqualTo(listed) &&
-            proposal.payload.currency === quote.currency &&
-            (amount.equals(listed) ||
-              (floor !== null &&
-                floor !== undefined &&
-                amount.greaterThanOrEqualTo(floor)));
-          if (!ok)
-            throw new ConflictError(
-              "PROPOSAL_INVALID",
-              "The negotiated price is outside what the provider allows.",
+          if (proposal.proposalType === "MANDATE_SELECTION") {
+            if (
+              !input.mandateId ||
+              proposal.payload.quote_id !== quote.id ||
+              proposal.payload.mandate_id !== input.mandateId
+            ) {
+              throw new ConflictError(
+                "PROPOSAL_INVALID",
+                "The Mandate selection is not valid for this quote.",
+              );
+            }
+          } else {
+            const amount = new Decimal(proposal.payload.agreed_amount);
+            const floorRes = await tx.query(
+              "SELECT min_price FROM services WHERE id = $1",
+              [quote.service_id],
             );
-          agreedPrice = toDecimalString(amount);
+            const floor = floorRes.rows[0]?.min_price;
+            const listed = new Decimal(quote.price);
+            const ok =
+              amount.greaterThan(0) &&
+              amount.lessThanOrEqualTo(listed) &&
+              proposal.payload.currency === quote.currency &&
+              (amount.equals(listed) ||
+                (floor !== null &&
+                  floor !== undefined &&
+                  amount.greaterThanOrEqualTo(floor)));
+            if (!ok)
+              throw new ConflictError(
+                "PROPOSAL_INVALID",
+                "The negotiated price is outside what the provider allows.",
+              );
+            agreedPrice = toDecimalString(amount);
+          }
         }
+        const mandateAcceptance = input.mandateId
+          ? await evaluateMandateInTx(tx, {
+              tenantId: input.tenantId,
+              mandateId: input.mandateId,
+              missionId,
+              buyerAgentId: input.buyerId,
+              agreedPrice,
+              currency: quote.currency,
+              serviceCategory: quote.service_category,
+              now,
+            })
+          : null;
         // 3. Evaluate deterministic policy
         const policyService = new PolicyService(tx);
         const evalResult = await policyService.evaluateQuoteAcceptance({
@@ -194,12 +263,12 @@ export class AgreementsService {
           `INSERT INTO agreements (
           id, tenant_id, mission_id, quote_id, buyer_id, provider_id,
           terms, price, currency, max_revisions, revision_count, status,
-          policy_decision_id, accepted_at
+          policy_decision_id, accepted_at, mandate_id
         ) VALUES (
           gen_random_uuid(), $1, $2, $3, $4, $5,
           $6, $7, $8, 2, 0, 'accepted',
-          $9, now()
-        ) RETURNING id, tenant_id, mission_id, quote_id, buyer_id, provider_id, terms, price, currency, max_revisions, revision_count, status, policy_decision_id, accepted_at, created_at`,
+          $9, now(), $10
+        ) RETURNING id, tenant_id, mission_id, quote_id, buyer_id, provider_id, terms, price, currency, max_revisions, revision_count, status, policy_decision_id, accepted_at, created_at, mandate_id`,
           [
             input.tenantId,
             missionId,
@@ -208,6 +277,7 @@ export class AgreementsService {
             quote.provider_id,
             JSON.stringify(
               proposal
+                && proposal.proposalType === "SELECTION"
                 ? {
                     ...(typeof quote.terms === "string"
                       ? JSON.parse(quote.terms)
@@ -227,6 +297,7 @@ export class AgreementsService {
             agreedPrice,
             quote.currency,
             evalResult.decisionId,
+            input.mandateId ?? null,
           ],
         );
 
@@ -238,12 +309,29 @@ export class AgreementsService {
         const walletMode =
           (await getFundingMode(tx, input.tenantId)) === "wallet";
         if (walletMode) {
-          await reserveInTx(tx, {
+          const reserved = await reserveInTx(tx, {
             tenantId: input.tenantId,
             agreementId: agreement.id,
             actorId: input.buyerId,
             correlationId: input.correlationId,
+            mandateId: input.mandateId,
           });
+          if (mandateAcceptance && input.mandateId && input.idempotencyKey) {
+            await recordAcceptanceInTx(tx, {
+              tenantId: input.tenantId,
+              mandate: mandateAcceptance.mandate,
+              quoteId: quote.id,
+              agreementId: agreement.id,
+              reservationId: reserved.reservation.id,
+              agentRunId: input.agentRunId,
+              idempotencyKey: input.idempotencyKey,
+              actorId: input.buyerId,
+              price: agreedPrice,
+              currency: quote.currency,
+              correlationId: input.correlationId,
+              now,
+            });
+          }
           await tx.query(
             "UPDATE agreements SET funding_status = 'funded' WHERE id = $1",
             [agreement.id],
@@ -300,6 +388,19 @@ export class AgreementsService {
         return agreement;
       });
     } catch (err: any) {
+      if (
+        input.mandateId &&
+        (err instanceof MandateRefusalError || err?.code === "FORBIDDEN_ACTION")
+      ) {
+        await recordRefusal(this.db, {
+          tenantId: input.tenantId,
+          principal: { type: "agent", id: input.buyerId, role: "buyer" },
+          operation: "mandate.accept_quote",
+          resource: { type: "quote", id: input.quoteId },
+          reasons: [String(err?.code ?? "FORBIDDEN_ACTION")],
+          correlationId: input.correlationId,
+        });
+      }
       // The acceptance rolled back; record the shortfall notice in a follow-up transaction (R5.3).
       await notifyInsufficientFunds(input.tenantId, err, input.quoteId);
       throw err;

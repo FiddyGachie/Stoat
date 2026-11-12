@@ -1,4 +1,4 @@
-import { DbClient } from '../../db/connection.js';
+import { DbClient, transaction } from '../../db/connection.js';
 import { EventsService } from '../events/events.service.js';
 import { toDecimalString, addDecimals } from '../../common/decimal.js';
 import {
@@ -8,6 +8,7 @@ import {
   ConflictError,
   InvalidTransitionError,
 } from '../../common/errors.js';
+import { assertSettlementNotHeld } from "../watchdog/hold-guard.js";
 
 export interface SettlementBatchItem {
   id: string;
@@ -173,65 +174,66 @@ export class SettlementService {
       );
     }
 
-    const batchRes = await this.db.query<SettlementBatch>(
-      `SELECT id, tenant_id, currency, total_amount, status, proposed_by, approved_by, approved_at, created_at, updated_at
-       FROM settlement_batches
-       WHERE tenant_id = $1 AND id = $2
-       FOR UPDATE`,
-      [params.tenantId, params.batchId]
-    );
-
-    if (batchRes.rows.length === 0) {
-      throw new NotFoundError(`Settlement batch ${params.batchId} not found.`);
-    }
-
-    const batch = batchRes.rows[0];
-    if (batch.status !== 'proposed' && batch.status !== 'approval_required') {
-      throw new InvalidTransitionError(
-        `Batch ${batch.id} in status '${batch.status}' cannot be approved (must be 'proposed' or 'approval_required').`
+    return transaction(async (tx) => {
+      const batchRes = await tx.query<SettlementBatch>(
+        `SELECT id, tenant_id, currency, total_amount, status, proposed_by, approved_by, approved_at, created_at, updated_at
+         FROM settlement_batches
+         WHERE tenant_id = $1 AND id = $2
+         FOR UPDATE`,
+        [params.tenantId, params.batchId]
       );
-    }
 
-    const updateRes = await this.db.query<SettlementBatch>(
-      `UPDATE settlement_batches
-       SET status = 'approved', approved_by = $1, approved_at = now(), updated_at = now()
-       WHERE id = $2
-       RETURNING id, tenant_id, currency, total_amount, status, proposed_by, approved_by, approved_at, created_at, updated_at`,
-      [params.actorId, batch.id]
-    );
+      if (batchRes.rows.length === 0) {
+        throw new NotFoundError(`Settlement batch ${params.batchId} not found.`);
+      }
 
-    const updated = updateRes.rows[0];
-    updated.total_amount = toDecimalString(updated.total_amount);
+      const batch = batchRes.rows[0];
+      await assertSettlementNotHeld(tx, params.tenantId, batch.id);
+      if (batch.status !== 'proposed' && batch.status !== 'approval_required') {
+        throw new InvalidTransitionError(
+          `Batch ${batch.id} in status '${batch.status}' cannot be approved (must be 'proposed' or 'approval_required').`
+        );
+      }
 
-    // Record human approval audit in approvals table
-    await this.db.query(
-      `INSERT INTO approvals (
-        id, tenant_id, approver_id, action, target_type, target_id, policy_snapshot, status, reason
-      ) VALUES (
-        gen_random_uuid(), $1, $2, 'approve', 'settlement_batch', $3, '{}', 'approved', $4
-      )`,
-      [params.tenantId, params.actorId, batch.id, params.reason || 'Human operator approved settlement batch']
-    );
+      const updateRes = await tx.query<SettlementBatch>(
+        `UPDATE settlement_batches
+         SET status = 'approved', approved_by = $1, approved_at = now(), updated_at = now()
+         WHERE id = $2
+         RETURNING id, tenant_id, currency, total_amount, status, proposed_by, approved_by, approved_at, created_at, updated_at`,
+        [params.actorId, batch.id]
+      );
 
-    // Append economic event
-    await this.eventsService.appendEvent({
-      tenantId: params.tenantId,
-      aggregateType: 'settlement_batch',
-      aggregateId: batch.id,
-      eventType: 'SETTLEMENT_BATCH_APPROVED',
-      actorType: 'user',
-      actorId: params.actorId,
-      correlationId: params.correlationId,
-      amount: updated.total_amount,
-      currency: updated.currency,
-      payload: {
-        batch_id: batch.id,
-        approved_by: params.actorId,
-        status: updated.status,
-      },
+      const updated = updateRes.rows[0];
+      updated.total_amount = toDecimalString(updated.total_amount);
+
+      await tx.query(
+        `INSERT INTO approvals (
+          id, tenant_id, approver_id, action, target_type, target_id, policy_snapshot, status, reason
+        ) VALUES (
+          gen_random_uuid(), $1, $2, 'approve', 'settlement_batch', $3, '{}', 'approved', $4
+        )`,
+        [params.tenantId, params.actorId, batch.id, params.reason || 'Human operator approved settlement batch']
+      );
+
+      await new EventsService(tx).appendEvent({
+        tenantId: params.tenantId,
+        aggregateType: 'settlement_batch',
+        aggregateId: batch.id,
+        eventType: 'SETTLEMENT_BATCH_APPROVED',
+        actorType: 'user',
+        actorId: params.actorId,
+        correlationId: params.correlationId,
+        amount: updated.total_amount,
+        currency: updated.currency,
+        payload: {
+          batch_id: batch.id,
+          approved_by: params.actorId,
+          status: updated.status,
+        },
+      });
+
+      return updated;
     });
-
-    return updated;
   }
 
   async rejectBatch(params: {

@@ -5,6 +5,7 @@ import { chargeInTx } from "../wallet/charge.service.js";
 import { enqueueMissionCompletionJob } from "../wallet/mission-completion.service.js";
 import { EventsService } from "../events/events.service.js";
 import { toDecimalString } from "../../common/decimal.js";
+import { HoldActiveError } from "../agentic/commerce-errors.js";
 import {
   NotFoundError,
   ConflictError,
@@ -68,16 +69,19 @@ export class LedgerService {
         `SELECT id, reason FROM holds 
          WHERE tenant_id = $1 AND status = 'active' 
          AND ((scope_type = 'agreement' AND scope_id = $2) 
-              OR (scope_type = 'mission' AND scope_id = $3))`,
+              OR (scope_type = 'mission' AND scope_id = $3)
+              OR (scope_type = 'reservation' AND scope_id IN (
+                SELECT id FROM wallet_reservations
+                WHERE tenant_id = $1 AND agreement_id = $2 AND status = 'active'
+              )))`,
         [params.tenantId, params.agreementId, agreement.mission_id],
       );
 
       if (holdsRes.rows.length > 0) {
-        throw new StoatError(
-          "HOLD_ACTIVE",
-          `Active hold prevents obligation accrual: ${holdsRes.rows[0].reason}`,
-          422,
-        );
+        throw new HoldActiveError({
+          hold_id: holdsRes.rows[0].id,
+          reason: holdsRes.rows[0].reason,
+        });
       }
 
       // 4. Invariant check: Exactly one obligation per agreement
@@ -213,7 +217,11 @@ export class LedgerService {
         });
         // Work verified and wallet charged: complete the mission now (the job re-checks that
         // no other agreement on it is still live) instead of waiting for the 30 s sweep.
-        await enqueueMissionCompletionJob(tx, params.tenantId, agreement.mission_id);
+        await enqueueMissionCompletionJob(
+          tx,
+          params.tenantId,
+          agreement.mission_id,
+        );
       }
 
       return {

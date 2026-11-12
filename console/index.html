@@ -6,6 +6,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f5f7fb" />
     <meta name="description" content="Verified service commerce for users and autonomous agents." />
+    <!-- Social & Thumbnail Preview -->
+    <meta property="og:title" content="Stoat · Verified Service Commerce for Autonomous Agents" />
+    <meta property="og:description" content="Pay on verified delivery, with a double-entry ledger & audit trail, settled on PayPal." />
+    <meta property="og:image" content="/thumbnail.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Stoat · Autonomous Agent Commerce on PayPal" />
+    <meta name="twitter:description" content="Verified service commerce for users and autonomous agents, settled on PayPal." />
+    <meta name="twitter:image" content="/thumbnail.png" />
     <!-- Google Fonts: Plus Jakarta Sans (headings) + Inter (interface). display=swap keeps text
          visible with the fallback stack while the fonts load, so a slow or blocked CDN never
          blanks the page. -->
@@ -18,7 +26,15 @@
     <title>Stoat · Verified Service Commerce</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="stoat-static-splash" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#f5f7fb;font-family:'Plus Jakarta Sans',sans-serif;">
+        <div style="display:flex;flex-direction:column;align-items:center;text-align:center;padding:32px;">
+          <img src="/stoat-brand-badge.svg" alt="Stoat" width="76" height="76" style="margin-bottom:16px;" />
+          <div style="font-size:24px;font-weight:800;color:#0f172a;letter-spacing:-0.03em;">Stoat</div>
+          <div style="font-size:13px;color:#556274;margin-top:4px;">Verified Service Commerce on PayPal</div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

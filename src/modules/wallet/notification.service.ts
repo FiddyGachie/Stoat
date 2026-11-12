@@ -27,6 +27,13 @@ export const NOTIFICATION_KINDS = [
   "reconciliation_exception",
   "trial_balance_mismatch",
   "wallet_balance_mismatch",
+  "mandate_exhausted",
+  "watchdog_alert",
+  "detector_error",
+  "proposal_execution_failed",
+  "agent_integrity_violation",
+  "model_budget_reached",
+  "held_accrual_stuck",
 ] as const;
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
@@ -40,11 +47,16 @@ export const ADMIN_ONLY_KINDS: ReadonlySet<NotificationKind> =
     "reconciliation_exception",
     "trial_balance_mismatch",
     "wallet_balance_mismatch",
+    "detector_error",
+    "proposal_execution_failed",
+    "agent_integrity_violation",
+    "model_budget_reached",
+    "held_accrual_stuck",
   ]);
 
 /** Addressed to the Owner (a specific user), not fanned out to Admins. */
 const OWNER_ONLY_KINDS: ReadonlySet<NotificationKind> =
-  new Set<NotificationKind>(["topup_incomplete"]);
+  new Set<NotificationKind>(["topup_incomplete", "mandate_exhausted"]);
 
 /** Kinds that also request an email where a provider is configured (R7.15). */
 const EMAIL_KINDS: ReadonlySet<NotificationKind> = new Set<NotificationKind>([
@@ -151,6 +163,12 @@ export function navigationLink(
       return `#/wallet`;
     case "reconciliation_run":
       return `#/reconciliation?run=${entityId}`;
+    case "mandate":
+      return `#/mandates?mandate=${entityId}`;
+    case "proposal":
+      return `#/approvals?proposal=${entityId}`;
+    case "alert":
+      return `#/watchdog?alert=${entityId}`;
     default:
       return null;
   }

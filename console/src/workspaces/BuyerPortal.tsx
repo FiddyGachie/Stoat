@@ -79,6 +79,15 @@ export function BuyerPortal({
   // show up without a reload (every 15 s while visible, and at once on a new notification).
   useLiveRefresh(() => { void refresh(true); });
 
+  const selectedService = services.find((s) => s.id === selectedServiceId) ?? null;
+  const startLabel = !selectedService
+    ? "Create mission"
+    : fundingMode === "wallet"
+      ? `Start mission (reserve ${Number(selectedService.unit_price).toFixed(2)} from wallet)`
+      : fundingMode === "direct"
+        ? `Start mission (pay ${Number(selectedService.unit_price).toFixed(2)} with PayPal)`
+        : "Start mission";
+
   async function createMission(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -92,20 +101,25 @@ export function BuyerPortal({
         currency: "USD",
       });
 
+      setMissionTitle("");
+      setMissionBrief("");
+      setSelectedServiceId("");
+
       if (selectedServiceId) {
-        await api.requestQuote({
+        // Start mission = create it, request the quote and accept it in one step. Clicking the
+        // button is the person's acceptance of the price shown on it. The server still applies the
+        // spending policy and mission budget; wallet mode reserves from the approved budget,
+        // direct mode opens PayPal checkout.
+        const quote = await api.requestQuote({
           mission_id: created.id,
           service_id: selectedServiceId,
           quantity: 1,
         });
-        setNotice("Mission created and quote requested from selected agent service.");
-      } else {
-        setNotice("Mission created. You can request quotes from available services.");
+        await refresh(true);
+        await acceptQuote(quote.id);
+        return;
       }
-
-      setMissionTitle("");
-      setMissionBrief("");
-      setSelectedServiceId("");
+      setNotice("Mission created. Request a quote from a service below when you're ready.");
       await refresh();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Mission could not be created.");
@@ -327,8 +341,15 @@ export function BuyerPortal({
                 </div>
 
                 <button type="submit" className="primary-button" disabled={busy}>
-                  <Icon icon={PlusCircle} /> {busy ? "Launching…" : "Create & Request Quote"}
+                  <Icon icon={PlusCircle} /> {busy ? "Starting…" : startLabel}
                 </button>
+                <p className="field-note" style={{ marginTop: 6 }}>
+                  {selectedService
+                    ? fundingMode === "wallet"
+                      ? `Creates the mission, gets a quote from ${selectedService.name} and reserves its price from your wallet. The provider starts right away; you're charged only when the work is verified.`
+                      : `Creates the mission, gets a quote from ${selectedService.name} and opens PayPal to pay for it.`
+                    : "No service picked: the mission is created and you can request quotes afterwards."}
+                </p>
               </form>
             </section>
 

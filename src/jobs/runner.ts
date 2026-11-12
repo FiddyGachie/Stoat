@@ -10,6 +10,11 @@ import { deliverEmail } from "../modules/wallet/notification.service.js";
 import type { PayPalGateway } from "../modules/paypal/paypal.gateway.js";
 import { handleReconciliationJob } from "../modules/wallet/reconciliation.service.js";
 import { handleMissionCompletionJob } from "../modules/wallet/mission-completion.service.js";
+import { handleHeldAccrual, type DeferredJob } from "./held-accrual.js";
+import { WatchdogService } from "../modules/watchdog/watchdog.service.js";
+import { executeProposal } from "../modules/proposals/proposal.executor.js";
+import { handleIntegrityCheckJob } from "../modules/agent-tools/integrity-check.js";
+import { ExplainService } from "../modules/watchdog/explain.service.js";
 
 const MAX_ATTEMPTS = parseInt(process.env.WORKER_MAX_ATTEMPTS || "5", 10);
 
@@ -78,7 +83,11 @@ async function handleProviderReview(
 
 const HANDLERS: Record<
   string,
-  (db: DbClient, payload: any, deps: JobDeps) => Promise<string | void>
+  (
+    db: DbClient,
+    payload: any,
+    deps: JobDeps,
+  ) => Promise<string | void | DeferredJob>
 > = {
   noop: async () => undefined,
   provider_review: handleProviderReview,
@@ -90,6 +99,52 @@ const HANDLERS: Record<
   // Scheduled reconciliation for one tenant (R11.8); enqueued by the wallet sweep.
   wallet_reconciliation: (db, payload, deps) =>
     handleReconciliationJob(db, payload, deps.gateway),
+  held_accrual: (db, payload) => handleHeldAccrual(db, payload),
+  agent_integrity_check: (db, payload) => handleIntegrityCheckJob(db, payload),
+  watchdog_evaluate: async (db, payload: { tenant_id?: string }) => {
+    if (!payload.tenant_id)
+      throw new Error("watchdog_evaluate requires tenant_id.");
+    const result = await new WatchdogService(db).evaluateTenant(
+      payload.tenant_id,
+    );
+    return `Watchdog evaluation ${result.status}`;
+  },
+  proposal_execute: async (
+    db,
+    payload: {
+      tenant_id?: string;
+      proposal_id?: string;
+      correlation_id?: string;
+    },
+  ) => {
+    if (!payload.tenant_id || !payload.proposal_id) {
+      throw new Error("proposal_execute requires tenant_id and proposal_id.");
+    }
+    const out = await executeProposal(db, {
+      tenantId: payload.tenant_id,
+      proposalId: payload.proposal_id,
+      correlationId: payload.correlation_id ?? undefined,
+    });
+    return out.status === "skipped"
+      ? `Proposal execution skipped: ${out.note}`
+      : `Proposal ${out.status}: ${out.code}`;
+  },
+  watchdog_explain: async (
+    db,
+    payload: { tenant_id?: string; alert_id?: string; correlation_id?: string },
+  ) => {
+    if (!payload.tenant_id || !payload.alert_id) {
+      throw new Error("watchdog_explain requires tenant_id and alert_id.");
+    }
+    const explanation = await new ExplainService(db).explain({
+      tenantId: payload.tenant_id,
+      alertId: payload.alert_id,
+      correlationId: payload.correlation_id,
+    });
+    return explanation.reused
+      ? "Watchdog explanation already exists"
+      : "Watchdog explanation stored";
+  },
 };
 
 async function claim(db: DbClient, workerId: string): Promise<Job | null> {
@@ -136,16 +191,24 @@ export async function runOneJob(
   const handler = HANDLERS[job.type];
   try {
     if (!handler) throw new Error(`Unknown job type: ${job.type}`);
-    const note = await handler(
+    const result = await handler(
       db,
       typeof job.payload === "string" ? JSON.parse(job.payload) : job.payload,
       deps,
     );
+    if (result && typeof result === "object" && "deferSeconds" in result) {
+      await db.query(
+        `UPDATE jobs SET status = 'queued', locked_at = NULL, locked_by = NULL,
+           run_after = now() + ($1 * interval '1 second'), error = $2 WHERE id = $3`,
+        [result.deferSeconds, result.note.slice(0, 1000), job.id],
+      );
+      return true;
+    }
     await db.query(
       `UPDATE jobs SET status = 'succeeded', completed_at = now(), error = $2 WHERE id = $1`,
-      [job.id, note ?? null],
+      [job.id, result ?? null],
     );
-    if (note) console.log(`[Jobs] ${job.type} ${job.id}: ${note}`);
+    if (result) console.log(`[Jobs] ${job.type} ${job.id}: ${result}`);
   } catch (err) {
     await fail(db, job, err);
   }

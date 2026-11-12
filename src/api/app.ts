@@ -39,6 +39,7 @@ import {
   ValidationError,
 } from "../common/errors.js";
 import { recordRefusal } from "../modules/wallet/wallet-events.js";
+import { registerAgenticRoutes } from "../modules/agentic/agentic.routes.js";
 
 /** After a quote is accepted, ask PayPal for the buyer's payment. Never fails the acceptance itself. */
 async function requestAgreementPayment(req: Request, agreementId: string) {
@@ -116,6 +117,8 @@ export interface AppDeps {
   gateway?: PayPalGateway;
   /** Test seam for the Budget_Advisor model transport. */
   advisorRuntime?: AgentRuntimeService;
+  /** Test seam for the insight and question agents' model transport. */
+  agenticRuntime?: AgentRuntimeService;
 }
 
 /**
@@ -816,6 +819,15 @@ export function createApp(deps?: AppDeps): Express {
             typeof req.body?.proposal_id === "string"
               ? req.body.proposal_id
               : undefined,
+          mandateId:
+            typeof req.body?.mandate_id === "string"
+              ? req.body.mandate_id
+              : undefined,
+          idempotencyKey:
+            typeof req.headers["idempotency-key"] === "string"
+              ? req.headers["idempotency-key"]
+              : undefined,
+          actorType: req.principal!.type,
           correlationId: req.correlationId,
         });
         res.status(200).json({
@@ -2688,6 +2700,8 @@ export function createApp(deps?: AppDeps): Express {
     gateway: deps?.gateway,
     advisorRuntime: deps?.advisorRuntime,
   });
+
+  registerAgenticRoutes(app, { runtime: deps?.agenticRuntime });
 
   // Mount error handler
   app.use(errorHandler);

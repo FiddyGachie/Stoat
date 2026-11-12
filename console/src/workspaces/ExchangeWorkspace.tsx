@@ -126,23 +126,21 @@ export const ExchangeWorkspace: React.FC = () => {
         currency: 'USD',
       });
 
-      // If a service was pre-selected, immediately request a quote
-      if (selectedService) {
-        await api.requestQuote({
-          mission_id: createdMission.id,
-          service_id: selectedService.id,
-          quantity: 1,
-        });
-        setNotice(`Mission "${createdMission.title}" launched and quote requested from ${selectedService.name}!`);
-      } else {
-        setNotice(`Mission "${createdMission.title}" created successfully!`);
-      }
-
+      const service = selectedService;
       setShowCreateModal(false);
       setSelectedService(null);
       setMissionTitle('');
       setMissionBrief('');
       setActiveTab('missions');
+      if (service) {
+        // Start mission = create, request the quote and accept it in one step (the click is the
+        // person's acceptance of the price on the button). The server applies policy and budget.
+        const quote = await api.requestQuote({ mission_id: createdMission.id, service_id: service.id, quantity: 1 });
+        refreshAll();
+        await handleAcceptQuote(quote.id);
+        return;
+      }
+      setNotice(`Mission "${createdMission.title}" created. Request a quote when you're ready.`);
       refreshAll();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Could not create mission');
@@ -739,7 +737,10 @@ export const ExchangeWorkspace: React.FC = () => {
                   className="btn btn-primary"
                   disabled={busy}
                 >
-                  {busy ? 'Launching…' : selectedService ? 'Launch & Request Quote' : 'Create Mission'}
+                  {busy ? 'Starting…' : !selectedService ? 'Create Mission'
+                    : fundingMode === 'wallet' ? `Start mission (reserve ${Number(selectedService.unit_price).toFixed(2)} from wallet)`
+                    : fundingMode === 'direct' ? `Start mission (pay ${Number(selectedService.unit_price).toFixed(2)} with PayPal)`
+                    : 'Start mission'}
                 </button>
               </div>
             </form>

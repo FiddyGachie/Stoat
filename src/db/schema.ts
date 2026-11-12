@@ -16,8 +16,10 @@ import {
   bigint,
   boolean,
   timestamp,
+  date,
   jsonb,
   type AnyPgColumn,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
@@ -272,6 +274,7 @@ export const agreements = pgTable("agreements", {
   maxRevisions: integer("max_revisions").notNull().default(2),
   revisionCount: integer("revision_count").notNull().default(0),
   status: text("status").notNull().default("accepted"),
+  mandateId: uuid("mandate_id"),
   policyDecisionId: uuid("policy_decision_id")
     .notNull()
     .references(() => policyDecisions.id),
@@ -628,6 +631,11 @@ export const holds = pgTable("holds", {
     .notNull()
     .defaultNow(),
   releasedAt: timestamp("released_at", { withTimezone: true }),
+  reasonCode: text("reason_code"),
+  placedByType: text("placed_by_type").notNull().default("user"),
+  alertId: uuid("alert_id"),
+  agentRunId: uuid("agent_run_id"),
+  releaseReason: text("release_reason"),
 });
 
 // ── 27. Idempotency Keys ──────────────────────────────────────────────────────
@@ -668,6 +676,11 @@ export const agentRuns = pgTable("agent_runs", {
     .default("0"),
   status: text("status").notNull().default("created"),
   terminalReason: text("terminal_reason"),
+  scope: jsonb("scope").notNull().default({}),
+  toolSet: text("tool_set").array().notNull().default([]),
+  correlationId: uuid("correlation_id"),
+  principalHash: text("principal_hash"),
+  principalExpiresAt: timestamp("principal_expires_at", { withTimezone: true }),
   startedAt: timestamp("started_at", { withTimezone: true }),
   completedAt: timestamp("completed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
@@ -834,6 +847,7 @@ export const commercialProposals = pgTable("commercial_proposals", {
   reasonCodes: jsonb("reason_codes").notNull().default([]),
   decisionReason: text("decision_reason"),
   acceptedAgreementId: uuid("accepted_agreement_id"),
+  mandateId: uuid("mandate_id"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -1074,6 +1088,7 @@ export const walletReservations = pgTable("wallet_reservations", {
   currency: text("currency").notNull(),
   status: text("status").notNull().default("active"),
   releaseReason: text("release_reason"),
+  mandateId: uuid("mandate_id"),
   createdAt: tstz("created_at").notNull().defaultNow(),
   closedAt: tstz("closed_at"),
 });
@@ -1228,6 +1243,176 @@ export const notifications = pgTable("notifications", {
   resolvedAt: tstz("resolved_at"),
   emailStatus: text("email_status").notNull().default("none"),
   emailAttempts: integer("email_attempts").notNull().default(0),
+});
+
+export const mandates = pgTable("mandates", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  ownerUserId: uuid("owner_user_id").notNull().references(() => users.id),
+  walletId: uuid("wallet_id").notNull(),
+  currency: text("currency").notNull(),
+  perAgreementMax: money("per_agreement_max").notNull(),
+  dailyCap: money("daily_cap").notNull(),
+  totalCap: money("total_cap").notNull(),
+  allowedCategories: text("allowed_categories").array().notNull(),
+  missionScope: uuid("mission_scope").array(),
+  expiresAt: tstz("expires_at").notNull(),
+  status: text("status").notNull().default("active"),
+  termsHash: text("terms_hash").notNull(),
+  signedBy: uuid("signed_by").notNull().references(() => users.id),
+  idempotencyKey: text("idempotency_key").notNull(),
+  requestHash: text("request_hash").notNull(),
+  revokedBy: uuid("revoked_by").references(() => users.id),
+  revokedAt: tstz("revoked_at"),
+  suspendedAt: tstz("suspended_at"),
+  suspendedByAlertId: uuid("suspended_by_alert_id"),
+  suspensionLiftedBy: uuid("suspension_lifted_by").references(() => users.id),
+  suspensionLiftedAt: tstz("suspension_lifted_at"),
+  suspensionLiftReason: text("suspension_lift_reason"),
+  createdAt: tstz("created_at").notNull().defaultNow(),
+  updatedAt: tstz("updated_at").notNull().defaultNow(),
+});
+
+export const mandateAcceptances = pgTable("mandate_acceptances", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  mandateId: uuid("mandate_id").notNull(),
+  quoteId: uuid("quote_id").notNull(),
+  agreementId: uuid("agreement_id").notNull().unique(),
+  reservationId: uuid("reservation_id").notNull().unique(),
+  agentRunId: uuid("agent_run_id"),
+  idempotencyKey: text("idempotency_key").notNull(),
+  createdAt: tstz("created_at").notNull().defaultNow(),
+});
+
+export const watchdogAlerts = pgTable("watchdog_alerts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  detector: text("detector").notNull(),
+  detectorVersion: text("detector_version").notNull(),
+  severity: text("severity").notNull(),
+  subjectType: text("subject_type").notNull(),
+  subjectId: uuid("subject_id").notNull(),
+  mandateId: uuid("mandate_id"),
+  ownerUserId: uuid("owner_user_id"),
+  status: text("status").notNull().default("open"),
+  evidence: jsonb("evidence").notNull(),
+  clearStreak: integer("clear_streak").notNull().default(0),
+  response: text("response").notNull().default("none"),
+  firstSeenAt: tstz("first_seen_at").notNull().defaultNow(),
+  lastSeenAt: tstz("last_seen_at").notNull().defaultNow(),
+  resolvedAt: tstz("resolved_at"),
+});
+
+export const watchdogThresholds = pgTable("watchdog_thresholds", {
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  detector: text("detector").notNull(),
+  params: jsonb("params").notNull(),
+  response: text("response").notNull().default("none"),
+  updatedBy: uuid("updated_by").references(() => users.id),
+  updatedAt: tstz("updated_at").notNull().defaultNow(),
+}, (table) => [primaryKey({ columns: [table.tenantId, table.detector] })]);
+
+export const watchdogRuns = pgTable("watchdog_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  startedAt: tstz("started_at").notNull().defaultNow(),
+  finishedAt: tstz("finished_at"),
+  status: text("status").notNull().default("running"),
+  counters: jsonb("counters").notNull().default({}),
+});
+
+export const watchdogDetectorState = pgTable("watchdog_detector_state", {
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  detector: text("detector").notNull(),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  lastError: text("last_error"),
+  lastErrorAt: tstz("last_error_at"),
+}, (table) => [primaryKey({ columns: [table.tenantId, table.detector] })]);
+
+export const proposals = pgTable("proposals", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  proposalType: text("proposal_type").notNull(),
+  schemaVersion: text("schema_version").notNull(),
+  status: text("status").notNull().default("pending"),
+  subjectKey: text("subject_key").notNull(),
+  payload: jsonb("payload").notNull(),
+  displayAmountHint: money("display_amount_hint"),
+  rationale: text("rationale").notNull(),
+  source: text("source").notNull(),
+  proposerAgentId: uuid("proposer_agent_id").notNull().references(() => agents.id),
+  agentRunId: uuid("agent_run_id").notNull().references(() => agentRuns.id),
+  promptHash: text("prompt_hash"),
+  modelId: text("model_id"),
+  parameters: jsonb("parameters").notNull().default({}),
+  validationDecision: jsonb("validation_decision").notNull(),
+  deciderScope: text("decider_scope").notNull(),
+  ownerUserId: uuid("owner_user_id").references(() => users.id),
+  expiresAt: tstz("expires_at").notNull(),
+  decidedBy: uuid("decided_by").references(() => users.id),
+  decidedRole: text("decided_role"),
+  decidedAt: tstz("decided_at"),
+  decisionComment: text("decision_comment"),
+  rejectionReason: text("rejection_reason"),
+  executionAttempts: integer("execution_attempts").notNull().default(0),
+  executedAt: tstz("executed_at"),
+  executionResultCode: text("execution_result_code"),
+  executionResult: jsonb("execution_result"),
+  createdAt: tstz("created_at").notNull().defaultNow(),
+  updatedAt: tstz("updated_at").notNull().defaultNow(),
+});
+
+export const proposalDecisions = pgTable("proposal_decisions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  proposalId: uuid("proposal_id").notNull().references(() => proposals.id),
+  principalType: text("principal_type").notNull(),
+  principalId: uuid("principal_id").notNull(),
+  decision: text("decision").notNull(),
+  reasonCodes: jsonb("reason_codes").notNull().default([]),
+  comment: text("comment"),
+  createdAt: tstz("created_at").notNull().defaultNow(),
+});
+
+export const insightNarratives = pgTable("insight_narratives", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  requestedBy: uuid("requested_by").notNull().references(() => users.id),
+  scopeOwnerUserId: uuid("scope_owner_user_id").references(() => users.id),
+  dateFrom: date("date_from").notNull(),
+  dateTo: date("date_to").notNull(),
+  filters: jsonb("filters").notNull().default({}),
+  digest: jsonb("digest").notNull(),
+  digestHash: text("digest_hash").notNull(),
+  narrative: jsonb("narrative").notNull(),
+  schemaVersion: text("schema_version").notNull(),
+  promptHash: text("prompt_hash").notNull(),
+  modelId: text("model_id").notNull(),
+  parameters: jsonb("parameters").notNull().default({}),
+  llmMode: text("llm_mode").notNull(),
+  replayed: boolean("replayed").notNull().default(false),
+  agentRunId: uuid("agent_run_id").notNull().references(() => agentRuns.id),
+  createdAt: tstz("created_at").notNull().defaultNow(),
+});
+
+export const nlQuestions = pgTable("nl_questions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull().references(() => users.id),
+  questionText: text("question_text").notNull(),
+  outcome: text("outcome").notNull().default("pending"),
+  intentName: text("intent_name"),
+  intentVersion: text("intent_version"),
+  params: jsonb("params"),
+  promptHash: text("prompt_hash"),
+  modelId: text("model_id"),
+  llmMode: text("llm_mode"),
+  replayed: boolean("replayed"),
+  agentRunId: uuid("agent_run_id"),
+  rowCount: integer("row_count"),
+  truncated: boolean("truncated"),
+  createdAt: tstz("created_at").notNull().defaultNow(),
 });
 
 export const reconciliationRuns = pgTable("reconciliation_runs", {

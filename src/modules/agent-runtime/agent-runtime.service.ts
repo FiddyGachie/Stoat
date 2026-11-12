@@ -12,6 +12,7 @@ export interface AgentRunLimits {
   max_steps: number;
   max_seconds: number;
   max_cost_usd: number;
+  max_tokens?: number;
 }
 
 export class AgentRuntimeService {
@@ -34,6 +35,10 @@ export class AgentRuntimeService {
     return this.llmAdapter;
   }
 
+  getDbClient(): DbClient {
+    return this.db;
+  }
+
   async startRun(params: {
     tenantId: string;
     agentId: string;
@@ -41,6 +46,11 @@ export class AgentRuntimeService {
     missionId?: string;
     parentRunId?: string;
     model?: string;
+    correlationId?: string;
+    scope?: Record<string, unknown>;
+    toolSet?: readonly string[];
+    principalHash?: string;
+    principalExpiresAt?: Date;
     limits?: Partial<AgentRunLimits>;
   }): Promise<any> {
     const envNumber = (name: string, fallback: number) => {
@@ -57,10 +67,11 @@ export class AgentRuntimeService {
     const res = await this.db.query(
       `INSERT INTO agent_runs (
         id, tenant_id, agent_id, role, mission_id, parent_run_id,
-        model, limits, steps_count, cost_usd, status, started_at
+        model, limits, steps_count, cost_usd, status, started_at,
+        correlation_id, scope, tool_set, principal_hash, principal_expires_at
       ) VALUES (
         gen_random_uuid(), $1, $2, $3, $4, $5,
-        $6, $7, 0, 0, 'running', now()
+        $6, $7, 0, 0, 'running', now(), $8, $9::jsonb, $10, $11, $12
       ) RETURNING id, tenant_id, agent_id, role, mission_id, model, limits, status, started_at`,
       [
         params.tenantId,
@@ -70,6 +81,11 @@ export class AgentRuntimeService {
         params.parentRunId || null,
         params.model || this.llmAdapter.getDefaultModel(),
         JSON.stringify(defaultLimits),
+        params.correlationId ?? null,
+        JSON.stringify(params.scope ?? {}),
+        [...(params.toolSet ?? [])],
+        params.principalHash ?? null,
+        params.principalExpiresAt?.toISOString() ?? null,
       ],
     );
 

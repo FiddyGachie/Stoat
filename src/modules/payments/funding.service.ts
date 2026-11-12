@@ -27,6 +27,7 @@ import {
   ValidationError,
 } from "../../common/errors.js";
 import { postTwoLineJournal } from "../ledger/postings.js";
+import { assertSettlementNotHeld } from "../watchdog/hold-guard.js";
 import { enqueueProviderReview } from "../../jobs/enqueue.js";
 import {
   GatewayCapture,
@@ -557,6 +558,7 @@ export class FundingService {
       );
       if (!b.rows[0]) throw new NotFoundError("Settlement batch", p.batchId);
       const batch = b.rows[0];
+      await assertSettlementNotHeld(tx, p.tenantId, batch.id);
       if (batch.status !== "approved") {
         throw new StoatError(
           "INVALID_TRANSITION",

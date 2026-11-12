@@ -150,14 +150,24 @@ describe("wallet analytics routes", () => {
     expect(foreign.body.rows[0].id).not.toBe(mine.id);
   });
 
+  it("serves the notifications dataset without exposing the notification recipient", async () => {
+    await q(
+      `INSERT INTO notifications (tenant_id, recipient_user_id, kind, title, body, event_id)
+       VALUES ($1, $2, 'deposit_captured', 'hello', 'b', $3)`,
+      [T, OWNER, `ev-${randomUUID()}`],
+    );
+    for (const who of [OWNER, ADMIN]) {
+      const r = await get("/v1/analytics/wallet/notifications", user(who));
+      expect(r.status).toBe(200);
+      expect(r.body.rows.length).toBeGreaterThan(0);
+      expect(JSON.stringify(r.body)).not.toMatch(/recipient|payee|email/i);
+    }
+  });
   it("pages with a cursor, rejects a bad cursor and an unknown dataset or chart", async () => {
     await deposit(OWNER, "1.00");
     await deposit(OWNER, "2.00");
     await deposit(OWNER, "3.00");
-    const p1 = await get(
-      "/v1/analytics/wallet/deposits?limit=2",
-      user(OWNER),
-    );
+    const p1 = await get("/v1/analytics/wallet/deposits?limit=2", user(OWNER));
     expect(p1.body.rows).toHaveLength(2);
     expect(p1.body.next_cursor).toBeTruthy();
     const p2 = await get(
@@ -169,9 +179,16 @@ describe("wallet analytics routes", () => {
     const ids = [...p1.body.rows, ...p2.body.rows].map((r: any) => r.id);
     expect(new Set(ids).size).toBe(3);
 
-    expect((await get("/v1/analytics/wallet/deposits?cursor=!!", user(OWNER))).status).toBe(400);
-    expect((await get("/v1/analytics/wallet/nope", user(OWNER))).status).toBe(404);
-    expect((await get("/v1/analytics/wallet/charts/nope", user(OWNER))).status).toBe(404);
+    expect(
+      (await get("/v1/analytics/wallet/deposits?cursor=!!", user(OWNER)))
+        .status,
+    ).toBe(400);
+    expect((await get("/v1/analytics/wallet/nope", user(OWNER))).status).toBe(
+      404,
+    );
+    expect(
+      (await get("/v1/analytics/wallet/charts/nope", user(OWNER))).status,
+    ).toBe(404);
   });
 
   it("exports all authorized rows as CSV with a header, and charts return points", async () => {
@@ -184,7 +201,13 @@ describe("wallet analytics routes", () => {
     const lines = String(csv.body).trim().split("\r\n");
     expect(lines[0]).toContain("amount");
     expect(lines).toHaveLength(2);
-    expect(lines[1]).not.toContain("7.5");
+    // Check the amount column only: a timestamp such as 13:16:07.500000Z can contain "7.5".
+    // Deposit rows contain no commas inside cells, so a plain split is safe here.
+    const amountIndex = lines[0].split(",").indexOf("amount");
+    expect(amountIndex).toBeGreaterThanOrEqual(0);
+    const amountCell = lines[1].split(",")[amountIndex];
+    expect(Number(amountCell)).toBe(25);
+    expect(Number(amountCell)).not.toBe(7.5);
 
     const chart = await get(
       "/v1/analytics/wallet/charts/deposit-status",

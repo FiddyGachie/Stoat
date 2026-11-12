@@ -41,6 +41,7 @@ import {
   markPayoutsDegraded,
 } from "../paypal/capabilities.js";
 import { RecipientService } from "./recipient.service.js";
+import { assertSettlementNotHeld } from "../watchdog/hold-guard.js";
 
 const APPROVAL_TTL_MS = 15 * 60 * 1000;
 const sha = (v: unknown) =>
@@ -253,6 +254,7 @@ export class PayoutService {
   private async gate(tenantId: string, batchId: string) {
     assertPayoutsEnabled();
     const plan = await this.plan(tenantId, batchId);
+    await assertSettlementNotHeld(this.db, tenantId, batchId, true);
     if (plan.batchStatus !== "confirmed") {
       throw new StoatError(
         "INVALID_TRANSITION",

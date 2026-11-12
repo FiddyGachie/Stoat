@@ -3,6 +3,7 @@ import { FundingService } from "./funding.service.js";
 import { PayoutService } from "./payout.service.js";
 import { BudgetService } from "./budget.service.js";
 import { runWalletSweep } from "../wallet/wallet.sweep.js";
+import { runAgenticSweep } from "../agentic/agentic.sweep.js";
 
 /**
  * Safety net for money movement. Every 30 seconds it finishes whatever the return redirect or a
@@ -24,6 +25,7 @@ export function startPaymentSweeps(
       const b = await new BudgetService(db).sweep();
       if (b.activated || b.errors) console.log("[BudgetSweep]", b);
       const w = await runWalletSweep(db);
+      const a = await runAgenticSweep(db);
       if (
         w.deposits.synced ||
         w.deposits.recovered ||
@@ -32,6 +34,7 @@ export function startPaymentSweeps(
         w.staleReconciliations
       )
         console.log("[WalletSweep]", w);
+      if (a.errors) console.log("[AgenticSweep]", a);
       if (f.captured || f.expired || f.errors || p.paid || p.errors)
         console.log("[PaymentSweep]", { funding: f, payouts: p });
     } catch (err) {

@@ -227,7 +227,6 @@ const DEFS: Record<AnalyticsDataset, DatasetDef> = {
   notifications: {
     columns: [
       col("id"),
-      col("recipient_user_id"),
       col("kind"),
       col("title"),
       col("body"),
@@ -239,7 +238,7 @@ const DEFS: Record<AnalyticsDataset, DatasetDef> = {
       col("read_at", "timestamp"),
       col("resolved_at", "timestamp"),
     ],
-    inner: `SELECT n.created_at AS _ts, n.id::text AS id, n.recipient_user_id::text AS recipient_user_id,
+    inner: `SELECT n.created_at AS _ts, n.id::text AS id,
                    n.kind, n.title, n.body, n.entity_type, n.entity_id::text AS entity_id,
                    n.mission_id::text AS mission_id, $4::text AS paypal_environment,
                    ${ISO("n.created_at")} AS created_at, ${ISO("n.read_at")} AS read_at,

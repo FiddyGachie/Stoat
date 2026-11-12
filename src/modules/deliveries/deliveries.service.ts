@@ -5,6 +5,8 @@ import { ArtifactsService } from "../artifacts/artifacts.service.js";
 import { GroundedVerifierService } from "../verification/grounded-verifier.service.js";
 import { releaseReservation } from "../wallet/reservation.service.js";
 import { NotFoundError, ConflictError } from "../../common/errors.js";
+import { HoldActiveError } from "../agentic/commerce-errors.js";
+import { enqueueHeldAccrual } from "../../jobs/enqueue.js";
 
 export interface SubmitDeliveryInput {
   tenantId: string;
@@ -165,21 +167,34 @@ export class DeliveriesService {
 
     // 7. Accrue obligation only if verified
     let obligationResult = null;
+    let accrual: "held" | undefined;
     if (verification.verdict === "verified") {
       const { LedgerService } = await import("../ledger/ledger.service.js");
       const ledgerService = new LedgerService(this.db);
-      obligationResult = await ledgerService.accrueObligationForDelivery({
-        tenantId: input.tenantId,
-        agreementId: input.agreementId,
-        deliveryId: delivery.id,
-        correlationId: input.correlationId,
-      });
+      try {
+        obligationResult = await ledgerService.accrueObligationForDelivery({
+          tenantId: input.tenantId,
+          agreementId: input.agreementId,
+          deliveryId: delivery.id,
+          correlationId: input.correlationId,
+        });
+      } catch (error) {
+        if (!(error instanceof HoldActiveError)) throw error;
+        await enqueueHeldAccrual(this.db, {
+          tenantId: input.tenantId,
+          agreementId: input.agreementId,
+          deliveryId: delivery.id,
+          correlationId: input.correlationId,
+        });
+        accrual = "held";
+      }
     }
 
     return {
       delivery,
       verification,
       obligation: obligationResult?.obligation || null,
+      ...(accrual ? { accrual } : {}),
     };
   }
 

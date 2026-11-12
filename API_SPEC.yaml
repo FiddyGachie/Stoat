@@ -124,7 +124,10 @@ paths:
         model cannot run, negotiation_error explains why and the quote stays open.
       parameters: [{ $ref: "#/components/parameters/MissionId" }]
       responses:
-        "201": { description: "{ mission, replay_of, last_spend, target_budget, quote, negotiation, negotiation_error }" }
+        "201":
+          {
+            description: "{ mission, replay_of, last_spend, target_budget, quote, negotiation, negotiation_error }",
+          }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "MISSION_NOT_COMPLETED or MISSION_HAS_NO_RESULT" }
@@ -135,8 +138,18 @@ paths:
         Human owner (own missions) or Admin (tenant). One record per verified agreement, written when
         its mission completes and backfilled for older completed missions on first read.
       parameters:
-        - { name: mission_id, in: query, required: false, schema: { type: string, format: uuid } }
-        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - {
+            name: mission_id,
+            in: query,
+            required: false,
+            schema: { type: string, format: uuid },
+          }
+        - {
+            name: limit,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 200 },
+          }
       responses:
         "200": { description: "{ results: [...] }" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1446,11 +1459,15 @@ paths:
               type: object
               required: [amount]
               properties:
-                amount: { type: string, description: "Decimal string greater than 0" }
+                amount:
+                  { type: string, description: "Decimal string greater than 0" }
                 currency: { type: string, pattern: "^[A-Za-z]{3}$" }
                 mission_id: { type: string, format: uuid, nullable: true }
       responses:
-        "200": { description: "The new budget and the retired one ({ budget, replaced })" }
+        "200":
+          {
+            description: "The new budget and the retired one ({ budget, replaced })",
+          }
         "400": { $ref: "#/components/responses/BadRequest" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1523,6 +1540,901 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+  # ── Agentic commerce ─────────────────────────────────────────────────────
+  # Every route below is tenant-scoped and authenticated. No route moves money: approving a Proposal
+  # or accepting under a Mandate never captures, refunds or pays out. Feature-flagged routes return
+  # 403 FEATURE_DISABLED when the flag is off. Agent principals are refused 403 FORBIDDEN_ACTION
+  # (one audit row) wherever a route is human-only.
+  # New error codes: FEATURE_DISABLED 403, RATE_LIMITED 429, HOLD_ACTIVE 422, HOLD_SUBJECT_INVALID 422,
+  # MANDATE_TERMS_IMMUTABLE 400, MANDATE_REQUIRES_WALLET_MODE 409, MANDATE_STATE_CONFLICT 409,
+  # MANDATE refusal codes 422, AGENT_OUTPUT_INVALID 422, MODEL_TIMEOUT 504, MODEL_BUDGET_EXCEEDED 429,
+  # PROPOSAL_TOO_LARGE 413, PROPOSAL_EXPIRED 409, PROPOSAL_INVALID 422, INVALID_DATE_RANGE 400,
+  # ANALYTICS_TIMEOUT 504, QUESTION_INVALID 400.
+  /agentic/capabilities:
+    get:
+      summary: Feature flags, model adapter mode and PayPal environment for the tenant
+      operationId: getAgenticCapabilities
+      responses:
+        "200":
+          description: Capabilities
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgenticCapabilities" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /agentic/flags/{flag}:
+    parameters:
+      - name: flag
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/AgenticFlag" }
+    put:
+      summary: Turn one agentic feature flag on or off (Admin only)
+      operationId: setAgenticFlag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Resulting flags
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [flags]
+                properties:
+                  flags: { $ref: "#/components/schemas/AgenticFlags" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /mandates:
+    post:
+      summary: Create a Mandate (Buyer only; terms are immutable afterwards)
+      operationId: createMandate
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: true,
+                description: Mandate terms (spend caps,
+                currency,
+                allowed providers and categories,
+                expiry).,
+              }
+      responses:
+        "201":
+          description: Mandate created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Mandate" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      summary: List Mandates visible to the caller
+      operationId: listMandates
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: Mandates
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [mandates]
+                properties:
+                  mandates:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Mandate" },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /mandates/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    get:
+      summary: Get one Mandate
+      operationId: getMandate
+      responses:
+        "200":
+          description: Mandate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Mandate" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Revoke a Mandate (Buyer only)
+      operationId: revokeMandate
+      responses:
+        "200":
+          description: Revoked Mandate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Mandate" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /mandates/{id}/lift-suspension:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Lift a Mandate suspension
+      operationId: liftMandateSuspension
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: Mandate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Mandate" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /missions/{id}/mandate-selection:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Buyer agent selects a quote and accepts it within a Mandate
+      description: Buyer agent principal only; a human or other agent is 403 FORBIDDEN_ACTION. Outside the Mandate's terms the refusal is a 422 with the specific refusal code. Moves no money.
+      operationId: selectAndAcceptUnderMandate
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mandate_id]
+              properties:
+                mandate_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Selection result
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /watchdog/alerts:
+    get:
+      summary: List Watchdog alerts (Owners see their own, Admins see the tenant)
+      operationId: listWatchdogAlerts
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: severity, in: query, schema: { type: string } }
+        - { name: detector, in: query, schema: { type: string } }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 200, default: 50 },
+          }
+        - {
+            name: offset,
+            in: query,
+            schema: { type: integer, minimum: 0, default: 0 },
+          }
+      responses:
+        "200":
+          description: Alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [alerts]
+                properties:
+                  alerts:
+                    {
+                      type: array,
+                      items: { type: object, additionalProperties: true },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /watchdog/alerts/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    get:
+      summary: Get one alert with its stored explanation, if any
+      operationId: getWatchdogAlert
+      responses:
+        "200":
+          description: Alert
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [alert, explanation]
+                properties:
+                  alert: { type: object, additionalProperties: true }
+                  explanation:
+                    { type: [object, "null"], additionalProperties: true }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /watchdog/alerts/{id}/explain:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Generate (or return the stored) display-only explanation of an alert (Admin only)
+      operationId: explainWatchdogAlert
+      responses:
+        "200":
+          description: Explanation, labelled model_written and replayed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [explanation]
+                properties:
+                  explanation:
+                    { type: [object, "null"], additionalProperties: true }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /watchdog/holds:
+    get:
+      summary: List Holds
+      operationId: listHolds
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 200, default: 50 },
+          }
+        - {
+            name: offset,
+            in: query,
+            schema: { type: integer, minimum: 0, default: 0 },
+          }
+      responses:
+        "200":
+          description: Holds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [holds]
+                properties:
+                  holds:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Hold" },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Place a Hold (Watchdog agent or Admin)
+      description: Idempotent. An agent must supply an agent_run_id belonging to it and is rate limited (429 RATE_LIMITED). Releasing a Hold is human-only.
+      operationId: placeHold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject_type, subject_id, reason_code]
+              properties:
+                subject_type: { type: string }
+                subject_id: { type: string, format: uuid }
+                reason_code: { type: string }
+                alert_id: { type: string, format: uuid }
+                agent_run_id: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Hold placed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hold]
+                properties:
+                  hold: { $ref: "#/components/schemas/Hold" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "429":
+          {
+            description: RATE_LIMITED,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+  /watchdog/holds/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    get:
+      summary: Get one Hold
+      operationId: getHold
+      responses:
+        "200":
+          description: Hold
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hold]
+                properties:
+                  hold: { $ref: "#/components/schemas/Hold" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /watchdog/holds/{id}/release:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Release a Hold (the owning person or an Admin; an agent is 403 FORBIDDEN_ACTION)
+      operationId: releaseHold
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: Released Hold
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [hold]
+                properties:
+                  hold: { $ref: "#/components/schemas/Hold" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /admin/watchdog/thresholds:
+    get:
+      summary: Detector names and the tenant's thresholds (Admin only)
+      operationId: listWatchdogThresholds
+      responses:
+        "200":
+          description: Thresholds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detectors, thresholds]
+                properties:
+                  detectors: { type: array, items: { type: string } }
+                  thresholds: { type: object, additionalProperties: true }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/watchdog/thresholds/{detector}:
+    parameters:
+      - { name: detector, in: path, required: true, schema: { type: string } }
+    put:
+      summary: Set one detector's parameters and response (Admin only)
+      operationId: setWatchdogThreshold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                params: { type: object, additionalProperties: true }
+                response: { type: string }
+      responses:
+        "200":
+          description: Updated threshold
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detector, threshold]
+                properties:
+                  detector: { type: string }
+                  threshold: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /proposals:
+    get:
+      summary: List Proposals (Owners see their own, Admins the tenant)
+      operationId: listProposals
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+        - {
+            name: limit,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 200, default: 50 },
+          }
+        - {
+            name: offset,
+            in: query,
+            schema: { type: integer, minimum: 0, default: 0 },
+          }
+      responses:
+        "200":
+          description: Proposals
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposals]
+                properties:
+                  proposals:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/AgenticProposal" },
+                    }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Submit a Proposal (agent principals only)
+      operationId: submitProposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, payload, agent_run_id]
+              properties:
+                type:
+                  {
+                    type: string,
+                    enum:
+                      [
+                        payout_batch,
+                        topup_suggestion,
+                        remainder_refund,
+                        mandate_change,
+                        hold_release,
+                      ],
+                  }
+                payload: { type: object, additionalProperties: true }
+                rationale: { type: string }
+                agent_run_id: { type: string, format: uuid }
+                provenance:
+                  type: object
+                  properties:
+                    source: { type: string, enum: [model, tool] }
+                    prompt_hash: { type: string }
+                    model_id: { type: string }
+                    parameters: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Proposal stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposal, created]
+                properties:
+                  proposal: { $ref: "#/components/schemas/AgenticProposal" }
+                  created: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413":
+          {
+            description: PROPOSAL_TOO_LARGE,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "429":
+          {
+            description: RATE_LIMITED,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+  /proposals/pending-count:
+    get:
+      summary: Number of pending, unexpired Proposals awaiting the caller
+      operationId: getPendingProposalCount
+      responses:
+        "200":
+          description: Count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count]
+                properties:
+                  count: { type: integer, minimum: 0 }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /proposals/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    get:
+      summary: Proposal with recomputed preview, validation decision, provenance and decisions
+      operationId: getProposal
+      responses:
+        "200":
+          description: Proposal detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposal, preview, provenance, decisions]
+                properties:
+                  proposal: { $ref: "#/components/schemas/AgenticProposal" }
+                  preview: { type: object, additionalProperties: true }
+                  validation_decision:
+                    { type: [object, "null"], additionalProperties: true }
+                  provenance:
+                    type: object
+                    properties:
+                      source: { type: string }
+                      prompt_hash: { type: [string, "null"] }
+                      model_id: { type: [string, "null"] }
+                      agent_run_id: { type: [string, "null"] }
+                      replayed: { type: boolean }
+                  decisions:
+                    {
+                      type: array,
+                      items: { type: object, additionalProperties: true },
+                    }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /proposals/{id}/approve:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Approve a Proposal (a person; never moves money by itself)
+      operationId: approveProposal
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/ProposalDecided" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /proposals/{id}/reject:
+    parameters:
+      - { $ref: "#/components/parameters/IdPath" }
+    post:
+      summary: Reject a Proposal
+      operationId: rejectProposal
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/ProposalDecided" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /analytics/payments/charts/{chart}:
+    get:
+      summary: Chart series for payments analytics (grouped by currency, never mixed)
+      operationId: getPaymentsChart
+      parameters:
+        - name: chart
+          in: path
+          required: true
+          schema:
+            {
+              type: string,
+              enum:
+                [
+                  spend-by-day,
+                  spend-by-mandate,
+                  spend-by-agent,
+                  spend-by-provider,
+                  spend-by-category,
+                  mandate-utilization,
+                  alerts-by-day,
+                  proposal-outcomes,
+                ],
+            }
+        - { $ref: "#/components/parameters/AnalyticsFrom" }
+        - { $ref: "#/components/parameters/AnalyticsTo" }
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Chart
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta, chart, type, groups]
+                properties:
+                  meta: { $ref: "#/components/schemas/AnalyticsMeta" }
+                  chart: { type: string }
+                  type: { type: string, enum: [bar, line, donut] }
+                  groups:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        currency: { type: [string, "null"] }
+                        points:
+                          type: array
+                          items:
+                            type: object
+                            required: [x, y]
+                            properties:
+                              x: { type: string }
+                              y: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "504":
+          {
+            description: ANALYTICS_TIMEOUT,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+  /analytics/payments/{dataset}:
+    get:
+      summary: Payments analytics dataset (grouped by currency; amounts are Decimal strings)
+      operationId: getPaymentsDataset
+      parameters:
+        - name: dataset
+          in: path
+          required: true
+          schema:
+            {
+              type: string,
+              enum:
+                [
+                  spend-facts,
+                  mandate-usage,
+                  alerts,
+                  holds,
+                  proposals,
+                  paypal-flows,
+                ],
+            }
+        - { $ref: "#/components/parameters/AnalyticsFrom" }
+        - { $ref: "#/components/parameters/AnalyticsTo" }
+        - {
+            name: status,
+            in: query,
+            description: Mandate status filter for mandate-usage.,
+            schema: { type: string },
+          }
+      responses:
+        "200":
+          description: Dataset
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta, groups]
+                properties:
+                  meta: { $ref: "#/components/schemas/AnalyticsMeta" }
+                  groups:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        currency: { type: [string, "null"] }
+                        rows:
+                          {
+                            type: array,
+                            items: { type: object, additionalProperties: true },
+                          }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "504":
+          {
+            description: ANALYTICS_TIMEOUT,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+  /analytics/payments/insights:
+    post:
+      summary: Deterministic digest plus a model-written narrative (display only)
+      description: If the model output is invalid the digest is still returned with narrative null and notice AGENT_OUTPUT_INVALID.
+      operationId: createPaymentsInsight
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from: { type: string }
+                to: { type: string }
+      responses:
+        "200":
+          description: Insight
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [digest, digest_hash]
+                properties:
+                  digest: { type: object, additionalProperties: true }
+                  digest_hash: { type: string }
+                  narrative:
+                    {
+                      type: [object, string, "null"],
+                      additionalProperties: true,
+                    }
+                  notice: { type: string }
+                  notice_text: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429":
+          {
+            description: MODEL_BUDGET_EXCEEDED or RATE_LIMITED,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+        "504":
+          {
+            description: MODEL_TIMEOUT or ANALYTICS_TIMEOUT,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+  /analytics/payments/questions:
+    post:
+      summary: Map a natural-language question to a typed read intent (no free SQL)
+      operationId: askPaymentsQuestion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "200":
+          description: Interpreted question and any follow-up intents
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+        "429":
+          {
+            description: MODEL_BUDGET_EXCEEDED or RATE_LIMITED,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+        "504":
+          {
+            description: MODEL_TIMEOUT,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+  /analytics/payments/intents/{intent}:
+    parameters:
+      - { name: intent, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Run an allowlisted read intent the person selected (scope comes from the principal)
+      operationId: runPaymentsIntent
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                params: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Intent result
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /agent-tools:
+    get:
+      summary: Tools the calling principal may use (same list as MCP tools/list)
+      description: No deposit, reserve, charge, capture, refund, approve, send, release or recipient tool exists on any interface.
+      operationId: listAgentTools
+      responses:
+        "200":
+          description: Tools
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tools]
+                properties:
+                  tools:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, description, kind, inputSchema]
+                      properties:
+                        name: { type: string }
+                        description: { type: string }
+                        kind: { type: string }
+                        inputSchema:
+                          { type: object, additionalProperties: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /agent-tools/{tool}:
+    parameters:
+      - { name: tool, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Call one agent tool through the shared gateway (same behaviour as MCP tools/call)
+      operationId: callAgentTool
+      requestBody:
+        content:
+          application/json:
+            schema:
+              {
+                type: object,
+                additionalProperties: true,
+                description: Tool arguments validated against the tool's inputSchema.,
+              }
+      responses:
+        "200":
+          description: Tool result
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429":
+          {
+            description: RATE_LIMITED,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+  /admin/agentic/integrity-check:
+    post:
+      summary: Run the on-demand agentic integrity check (operator or supervisor)
+      operationId: runAgenticIntegrityCheck
+      responses:
+        "200":
+          description: Check result
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "403": { $ref: "#/components/responses/Forbidden" }
 components:
   securitySchemes:
     bearerAuth:
@@ -1552,7 +2464,86 @@ components:
       required: false
       description: Opaque cursor from a previous page's next_cursor. An invalid cursor is 400 VALIDATION_FAILED.
       schema: { type: string, maxLength: 500 }
+    AnalyticsFrom:
+      name: from
+      in: query
+      required: false
+      description: Inclusive start date. A malformed, reversed or over-366-day range is 400 INVALID_DATE_RANGE.
+      schema: { type: string }
+    AnalyticsTo:
+      name: to
+      in: query
+      required: false
+      description: Inclusive end date.
+      schema: { type: string }
   schemas:
+    AgenticFlag:
+      type: string
+      enum:
+        [
+          mandates,
+          watchdog,
+          watchdog_explanations,
+          proposals,
+          payments_analytics,
+          insights,
+          nl_questions,
+        ]
+    AgenticFlags:
+      type: object
+      additionalProperties: { type: boolean }
+    AgenticCapabilities:
+      type: object
+      required: [flags, adapter_mode, paypal_environment]
+      properties:
+        flags: { $ref: "#/components/schemas/AgenticFlags" }
+        adapter_mode: { type: string, description: "live, record or replay" }
+        paypal_environment: { type: string, enum: [sandbox, live, unknown] }
+    Mandate:
+      type: object
+      additionalProperties: true
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string }
+    Hold:
+      type: object
+      additionalProperties: true
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string }
+        scope_type: { type: string }
+        scope_id: { type: string, format: uuid }
+    AgenticProposal:
+      type: object
+      additionalProperties: true
+      description: Never carries a recipient or payee identifier.
+      properties:
+        id: { type: string, format: uuid }
+        proposal_type: { type: string }
+        status: { type: string }
+        payload: { type: object, additionalProperties: true }
+        display_amount_hint: { type: [string, "null"] }
+        expires_at: { type: string, format: date-time }
+    AnalyticsMeta:
+      type: object
+      required:
+        [
+          dataset,
+          from,
+          to,
+          generated_at,
+          paypal_environment,
+          row_count_total,
+          truncated,
+        ]
+      properties:
+        dataset: { type: string }
+        from: { type: string }
+        to: { type: string }
+        generated_at: { type: string, format: date-time }
+        paypal_environment: { type: string, enum: [sandbox, live, unknown] }
+        row_count_total: { type: integer }
+        truncated: { type: boolean }
     DecimalString:
       type: string
       pattern: '^-?(0|[1-9][0-9]*)(\.[0-9]+)?$'
@@ -2241,6 +3232,17 @@ components:
             correlation_id: { type: string }
             details: { type: object }
   responses:
+    ProposalDecided:
+      description: Decision recorded (idempotent; already_decided is true on a repeat)
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [proposal, status, already_decided]
+            properties:
+              proposal: { $ref: "#/components/schemas/AgenticProposal" }
+              status: { type: string }
+              already_decided: { type: boolean }
     BadRequest:
       description: Validation failure
       content:

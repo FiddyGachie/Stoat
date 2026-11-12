@@ -16,6 +16,9 @@ export const TRUNCATE_ALL = `
                  economic_events, idempotency_keys, policy_decisions,
                  wallet_refund_items, wallet_refunds, remainder_decisions, wallet_charges,
                  wallet_reservations, mission_funding, wallet_deposits, wallets,
+                 proposal_decisions, proposals, insight_narratives, nl_questions,
+                 mandate_acceptances, mandates, watchdog_detector_state, watchdog_runs,
+                 watchdog_thresholds, watchdog_alerts,
                  notifications, reconciliation_exceptions, reconciliation_runs,
                  wallet_migration_report CASCADE;
 `;
